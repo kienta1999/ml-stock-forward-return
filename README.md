@@ -18,7 +18,7 @@ filters and picks. Here we score and sort.
 | Features | 17 per-ticker + 8 market-context + 16 cross-sectional ranks + sector cat.    |
 | Label    | `close[t+21] / close[t] - 1`                                                 |
 | Split    | Train 2007–2017, Val 2018–2020, Test 2021→. Chronological. No shuffling.     |
-| Model    | XGBoost regressor, tuned on the val set                                      |
+| Model    | XGBoost regressor, RMSE loss, optuna-tuned on val IC                         |
 | Backtest | Daily predictions → rank → long top 10% equal-weight, 21d hold, 21 sleeves   |
 | Costs    | 5 bps per side on rebalance turnover                                         |
 
@@ -63,8 +63,11 @@ uv run python scripts/labels.py                     # add forward_21d_return →
 uv run python scripts/dataset.py                    # splits + lookahead sanity check
 uv run python scripts/dataset.py --quick            # same, skip the slow recompute check
 
+uv run python scripts/train.py                      # optuna tuning + final fit (~10-15 min)
+uv run python scripts/train.py --trials 20          # faster tune
+uv run python scripts/train.py --quick              # skip tuning, use sane defaults
+
 # (the rest is stubbed — building piece by piece)
-# uv run python scripts/train.py
 # uv run python scripts/backtest.py
 # uv run python scripts/evaluate.py
 ```
@@ -161,6 +164,48 @@ Every feature on row `date=D` is computed using only data with date ≤ D. All o
 
 ---
 
+## Model
+
+XGBoost regressor on the 41 features. Why XGBoost: handles missing values, scales
+to millions of rows, native categorical (`gics_sector`) without encoding, and
+gives feature importances for free.
+
+### Three roles, two metrics
+
+| Role | Metric | Why |
+|---|---|---|
+| Training loss | **RMSE** (`reg:squarederror`) | XGBoost needs a smooth differentiable loss; RMSE is the default and gives stable gradients. |
+| Tuning objective | **mean daily IC** on val | We're a ranker, not a forecaster. RMSE rewards getting magnitudes right; IC rewards getting the *order* right — which is what the strategy uses. |
+| Reporting | **RMSE + IC + decile spread** | Cross-checks: RMSE catches magnitude blow-ups, IC catches ranking quality, decile spread is the most direct proxy for strategy P&L. |
+
+### Hyperparameter search
+
+Tuned with **optuna** (TPE sampler, ~50 trials). Knobs and ranges:
+
+| Param | Range | What it controls |
+|---|---|---|
+| `max_depth` | 3–8 | Tree depth. Deeper = more interaction terms but more overfitting. |
+| `learning_rate` | 0.01–0.3 (log) | How aggressively each tree corrects errors. Smaller + more trees usually wins. |
+| `n_estimators` | 200–1000 | Max number of trees. Capped by early stopping. |
+| `min_child_weight` | 1–20 | Minimum sum of sample weights per leaf. Higher = simpler trees. |
+| `subsample` | 0.6–1.0 | Row sampling per tree. <1 adds randomness → robustness. |
+| `colsample_bytree` | 0.6–1.0 | Feature sampling per tree. Same idea, on columns. |
+| `reg_lambda` | 0.01–10 (log) | L2 regularization on leaf weights. |
+
+Each trial trains one model with early stopping (50 rounds on val RMSE) and
+returns mean daily val IC. Optuna picks the next combo to try based on what's
+worked so far. The final model is refit on the best params and saved to
+`models/xgb_v1.json`.
+
+### Outputs
+
+- `models/xgb_v1.json` — trained booster
+- `reports/feature_importance.csv` — per-feature gain importance
+- `reports/optuna_trials.csv` — full tuning history (params + IC per trial)
+- `reports/train_metrics.json` — final train/val RMSE + IC + decile spread + chosen params
+
+---
+
 ## File layout
 
 ```
@@ -174,7 +219,7 @@ reports/                         # equity curve, feature importance, metrics.jso
 scripts/
   universe.py    data.py         # implemented
   features.py    labels.py       # implemented
-  dataset.py     train.py        # stub
+  dataset.py     train.py        # implemented
   backtest.py    evaluate.py     # stub
   run_all.py                     # stub
 ```
@@ -203,7 +248,7 @@ scripts/
 - [x] features.py
 - [x] labels.py
 - [x] dataset.py + lookahead sanity assertion
-- [ ] train.py with hyperparameter tuning
+- [x] train.py with hyperparameter tuning
 - [ ] backtest.py with overlapping 21-day sleeves
 - [ ] evaluate.py + plots
 - [ ] run_all.py orchestrator
