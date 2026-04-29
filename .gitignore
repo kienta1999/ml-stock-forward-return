@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Cached data (regeneratable)
+data/raw/
+data/market/
+data/processed/
+data/universe/sp500_members.csv
+
+# Trained artifacts
+models/*.json
+reports/*.png
+reports/*.json
