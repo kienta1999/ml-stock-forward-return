@@ -45,7 +45,7 @@ _ROOT = os.path.dirname(_HERE)
 RAW_DIR = os.path.join(_ROOT, "data", "raw")
 MARKET_DIR = os.path.join(_ROOT, "data", "market")
 
-DEFAULT_START = "2007-01-01"
+DEFAULT_START = "2005-07-01"  # 1.5y buffer before TRAIN_START=2007-01-01 so 252d rolling features warm up cleanly
 MIN_HISTORY_DAYS = 500
 WORKERS = 8
 RETRIES = 3

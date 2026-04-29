@@ -14,10 +14,10 @@ filters and picks. Here we score and sort.
 | Stage    | What it does                                                                 |
 |----------|------------------------------------------------------------------------------|
 | Universe | Current S&P 500 from Wikipedia (v1)                                          |
-| Data     | yfinance OHLCV 2007-01-01 → today, per-ticker parquet cache, plus SPY + ^VIX |
+| Data     | yfinance OHLCV 2005-07-01 → today (1.5y buffer for 252d warmup), per-ticker parquet cache, plus SPY + ^VIX |
 | Features | 17 per-ticker + 8 market-context + 16 cross-sectional ranks + sector cat.    |
 | Label    | `close[t+21] / close[t] - 1`                                                 |
-| Split    | Train ≤2017, Val 2018–2020, Test 2021→. Chronological. No shuffling.         |
+| Split    | Train 2007–2017, Val 2018–2020, Test 2021→. Chronological. No shuffling.     |
 | Model    | XGBoost regressor, tuned on the val set                                      |
 | Backtest | Daily predictions → rank → long top 10% equal-weight, 21d hold, 21 sleeves   |
 | Costs    | 5 bps per side on rebalance turnover                                         |
@@ -60,9 +60,10 @@ uv run python scripts/data.py                       # full universe + SPY + VIX 
 uv run python scripts/features.py --ticker AAPL     # smoke-print one ticker's features
 uv run python scripts/features.py                   # build full panel → data/processed/features.parquet
 uv run python scripts/labels.py                     # add forward_21d_return → data/processed/panel.parquet
+uv run python scripts/dataset.py                    # splits + lookahead sanity check
+uv run python scripts/dataset.py --quick            # same, skip the slow recompute check
 
 # (the rest is stubbed — building piece by piece)
-# uv run python scripts/dataset.py
 # uv run python scripts/train.py
 # uv run python scripts/backtest.py
 # uv run python scripts/evaluate.py
@@ -201,7 +202,7 @@ scripts/
 - [ ] v2: point-in-time S&P 500 membership (kill survivorship bias)
 - [x] features.py
 - [x] labels.py
-- [ ] dataset.py + lookahead sanity assertion
+- [x] dataset.py + lookahead sanity assertion
 - [ ] train.py with hyperparameter tuning
 - [ ] backtest.py with overlapping 21-day sleeves
 - [ ] evaluate.py + plots
