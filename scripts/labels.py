@@ -1,20 +1,84 @@
 #!/usr/bin/env python3
 """Forward-return labels.
 
-label = close[t+21] / close[t] - 1
-Drop rows where label is NaN (the last 21 trading days of each ticker).
+label = close[t+N] / close[t] - 1   (default N = 21 trading days)
 
-NOT YET IMPLEMENTED — stub.
+Per spec: drop rows where the label is NaN — that's the last N trading days
+of each ticker (no future data to compute against).
+
+CLI:
+    python scripts/labels.py            # add label to features parquet → data/processed/panel.parquet
 """
+
+import argparse
+import os
+import sys
 
 import pandas as pd
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+_ROOT = os.path.dirname(_HERE)
+FEATURES_PATH = os.path.join(_ROOT, "data", "processed", "features.parquet")
+PANEL_PATH = os.path.join(_ROOT, "data", "processed", "panel.parquet")
+
 FORWARD_DAYS = 21
+LABEL_COL = f"forward_{FORWARD_DAYS}d_return"
 
 
 def forward_return(close: pd.Series, days: int = FORWARD_DAYS) -> pd.Series:
-    raise NotImplementedError
+    """One ticker's forward return series. Last `days` rows will be NaN."""
+    return close.shift(-days) / close - 1
+
+
+def add_label(
+    panel: pd.DataFrame,
+    days: int = FORWARD_DAYS,
+    drop_na: bool = True,
+) -> pd.DataFrame:
+    """Add forward-return column to a long panel sorted by (ticker, date).
+
+    Requires `panel` to carry a `close` column (features.build_panel does).
+    """
+    if "close" not in panel.columns:
+        raise ValueError("panel needs a 'close' column — see features.build_panel")
+
+    panel = panel.sort_values(["ticker", "date"]).reset_index(drop=True)
+    label_col = f"forward_{days}d_return"
+    panel[label_col] = panel.groupby("ticker", sort=False)["close"].transform(
+        lambda s: s.shift(-days) / s - 1
+    )
+    if drop_na:
+        panel = panel.dropna(subset=[label_col]).reset_index(drop=True)
+    return panel
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--features", default=FEATURES_PATH)
+    ap.add_argument("--out", default=PANEL_PATH)
+    ap.add_argument("--days", type=int, default=FORWARD_DAYS)
+    args = ap.parse_args()
+
+    if not os.path.exists(args.features):
+        raise SystemExit(f"{args.features} not found. Run scripts/features.py first.")
+
+    panel = pd.read_parquet(args.features)
+    n_before = len(panel)
+    panel = add_label(panel, days=args.days)
+    label_col = f"forward_{args.days}d_return"
+    print(
+        f"Added {label_col}. Rows: {n_before:,} → {len(panel):,} "
+        f"(dropped {n_before - len(panel):,} tail rows with NaN label)."
+    )
+    print(f"Label stats:\n{panel[label_col].describe().to_string()}")
+
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    panel.to_parquet(args.out, index=False)
+    print(f"\nWrote {args.out}")
 
 
 if __name__ == "__main__":
-    raise SystemExit("labels.py not yet implemented")
+    main()
