@@ -46,23 +46,19 @@ warnings.filterwarnings("ignore")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import xgboost as xgb
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
+import strategy  # noqa: E402
 from data import load_market  # noqa: E402
-from dataset import FEATURE_COLS, TEST_START, load_panel  # noqa: E402
+from dataset import TEST_START, load_panel  # noqa: E402
 
 _ROOT = os.path.dirname(_HERE)
 MODEL_PATH = os.path.join(_ROOT, "models", "xgb_v1.json")
 REPORTS_DIR = os.path.join(_ROOT, "reports")
 
-DEFAULT_TOP_N = 50
-DEFAULT_HOLD_DAYS = 21
-DEFAULT_COST_PER_SIDE = 0.0005   # 5 bps
-DEFAULT_VIX_THRESHOLD = 25.0
 PERIODS_PER_YEAR = 252
 
 
@@ -73,38 +69,13 @@ PERIODS_PER_YEAR = 252
 
 def predict_test(panel: pd.DataFrame, model_path: str) -> pd.DataFrame:
     """Score the test slice with the saved xgb_v1 model."""
-    booster = xgb.XGBRegressor(enable_categorical=True)
-    booster.load_model(model_path)
-    test = panel[panel["date"] >= TEST_START].copy()
-    test["predicted_return"] = booster.predict(test[FEATURE_COLS])
-    return test
-
-
-def prepare_market(spy_df: pd.DataFrame, vix_df: pd.DataFrame) -> pd.DataFrame:
-    """Date-indexed frame with SPY close, SPY SMA200, VIX close, SPY 1d return."""
-    market = pd.DataFrame({
-        "spy_close": spy_df["Close"],
-        "vix_close": vix_df["Close"],
-    })
-    market.index = pd.to_datetime(market.index)
-    market["spy_sma200"] = market["spy_close"].rolling(200).mean()
-    market["spy_ret_1d"] = market["spy_close"].pct_change()
-    return market
+    test = panel[panel["date"] >= TEST_START]
+    return strategy.predict(test, strategy.load_model(model_path))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Backtest core
 # ─────────────────────────────────────────────────────────────────────────────
-
-
-def _go_long_today(market_row: pd.Series, vix_threshold: float) -> bool:
-    """Regime gate: SPY trending up AND VIX not in stress."""
-    if pd.isna(market_row["spy_sma200"]) or pd.isna(market_row["vix_close"]):
-        return False
-    return bool(
-        market_row["spy_close"] > market_row["spy_sma200"]
-        and market_row["vix_close"] < vix_threshold
-    )
 
 
 def run_one_offset(
@@ -145,13 +116,13 @@ def run_one_offset(
             go_long = True
             if regime_gate:
                 if date in market.index:
-                    go_long = _go_long_today(market.loc[date], vix_threshold)
+                    go_long = strategy.regime_long_row(market.loc[date], vix_threshold)
                 else:
                     go_long = False
 
             if go_long and date in by_date:
                 day = by_date[date]
-                top = day.nlargest(top_n, "predicted_return")
+                top = strategy.top_picks(day, top_n)
                 new_weights = {t: 1.0 / top_n for t in top["ticker"]}
             else:
                 new_weights = {}
@@ -309,11 +280,11 @@ def _print_stats(label: str, stats: dict, extra: str = "") -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--top-n", type=int, default=DEFAULT_TOP_N)
-    ap.add_argument("--hold-days", type=int, default=DEFAULT_HOLD_DAYS)
-    ap.add_argument("--cost-bps", type=float, default=DEFAULT_COST_PER_SIDE * 1e4,
+    ap.add_argument("--top-n", type=int, default=strategy.TOP_N)
+    ap.add_argument("--hold-days", type=int, default=strategy.HOLD_DAYS)
+    ap.add_argument("--cost-bps", type=float, default=strategy.COST_PER_SIDE * 1e4,
                     help="Cost per side in basis points (default 5).")
-    ap.add_argument("--vix-threshold", type=float, default=DEFAULT_VIX_THRESHOLD)
+    ap.add_argument("--vix-threshold", type=float, default=strategy.VIX_THRESHOLD)
     ap.add_argument("--no-overlay", action="store_true",
                     help="Skip the gated variant (only run raw long-only + SPY).")
     ap.add_argument("--model", default=MODEL_PATH)
@@ -328,7 +299,7 @@ def main() -> None:
           f"({test_panel['date'].min().date()} → {test_panel['date'].max().date()})")
 
     market_data = load_market()
-    market = prepare_market(market_data["SPY"], market_data["VIX"])
+    market = strategy.prepare_market(market_data["SPY"], market_data["VIX"])
 
     gated_curves: pd.DataFrame | None = None
     gated_tim: pd.Series | None = None
