@@ -1,29 +1,389 @@
 #!/usr/bin/env python3
-"""Backtest the trained ranker on the test set.
+"""Backtest the trained ranker on the test set (2021→).
 
-Each trading day:
-  1. Predict forward_21d_return for every active ticker.
-  2. Rank by prediction; long top decile (equal-weight).
-  3. Hold 21 trading days.
+Strategy (v1, long-only):
+    Every 21 trading days:
+        if SPY_close > SPY_SMA200 and VIX_close < 25:
+            portfolio = top 50 stocks by predicted forward return, equal-weight
+        else:
+            portfolio = cash
+    Hold each lot 21 trading days, then rebalance.
 
-Implementation: 21 overlapping equal-weight sleeves running in parallel; one
-sleeve rotates each day. Portfolio = mean of sleeves → smooth daily curve.
-Cost: 5 bps per side on rebalance turnover.
+Rebalance-date robustness:
+    The above is run 21 times, each starting on a different anchor day
+    (offset = 0..20). Every offset produces an independent equity curve.
+    We report the mean and the 10th/90th percentile band — small spread
+    means rebalance-date doesn't matter much, large spread means it does.
 
-NOT YET IMPLEMENTED — stub.
+Variants reported:
+    1. SPY buy-and-hold (benchmark)
+    2. Long-only, regime gate ON  (the actual proposed strategy)
+    3. Long-only, regime gate OFF (diagnostic — raw stock-picking, no timing)
+
+Costs: 5 bps per side on rebalance turnover.
+Execution: trade at close of rebalance day (assumes MOC orders work).
+
+Outputs:
+    reports/backtest_equity.png   — equity curves vs SPY
+    reports/backtest_stats.json   — CAGR / Sharpe / Max DD / time-in-market
+    reports/backtest_equity.csv   — daily NAV per variant (mean across offsets)
+
+CLI:
+    uv run python scripts/backtest.py
+    uv run python scripts/backtest.py --no-overlay     # gated variant off
+    uv run python scripts/backtest.py --top-n 25       # tighter pick
+    uv run python scripts/backtest.py --vix-threshold 30
 """
 
+import argparse
+import json
+import os
+import sys
+import warnings
+
+warnings.filterwarnings("ignore")
+
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+import xgboost as xgb
 
-TOP_DECILE = 0.10
-HOLD_DAYS = 21
-COST_BPS = 5  # per side
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+from data import load_market  # noqa: E402
+from dataset import FEATURE_COLS, TEST_START, load_panel  # noqa: E402
+
+_ROOT = os.path.dirname(_HERE)
+MODEL_PATH = os.path.join(_ROOT, "models", "xgb_v1.json")
+REPORTS_DIR = os.path.join(_ROOT, "reports")
+
+DEFAULT_TOP_N = 50
+DEFAULT_HOLD_DAYS = 21
+DEFAULT_COST_PER_SIDE = 0.0005   # 5 bps
+DEFAULT_VIX_THRESHOLD = 25.0
+PERIODS_PER_YEAR = 252
 
 
-def run_backtest(predictions: pd.DataFrame) -> pd.DataFrame:
-    """predictions: long panel (date, ticker, pred). Returns daily equity curve."""
-    raise NotImplementedError
+# ─────────────────────────────────────────────────────────────────────────────
+# Data prep
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def predict_test(panel: pd.DataFrame, model_path: str) -> pd.DataFrame:
+    """Score the test slice with the saved xgb_v1 model."""
+    booster = xgb.XGBRegressor(enable_categorical=True)
+    booster.load_model(model_path)
+    test = panel[panel["date"] >= TEST_START].copy()
+    test["predicted_return"] = booster.predict(test[FEATURE_COLS])
+    return test
+
+
+def prepare_market(spy_df: pd.DataFrame, vix_df: pd.DataFrame) -> pd.DataFrame:
+    """Date-indexed frame with SPY close, SPY SMA200, VIX close, SPY 1d return."""
+    market = pd.DataFrame({
+        "spy_close": spy_df["Close"],
+        "vix_close": vix_df["Close"],
+    })
+    market.index = pd.to_datetime(market.index)
+    market["spy_sma200"] = market["spy_close"].rolling(200).mean()
+    market["spy_ret_1d"] = market["spy_close"].pct_change()
+    return market
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Backtest core
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _go_long_today(market_row: pd.Series, vix_threshold: float) -> bool:
+    """Regime gate: SPY trending up AND VIX not in stress."""
+    if pd.isna(market_row["spy_sma200"]) or pd.isna(market_row["vix_close"]):
+        return False
+    return bool(
+        market_row["spy_close"] > market_row["spy_sma200"]
+        and market_row["vix_close"] < vix_threshold
+    )
+
+
+def run_one_offset(
+    by_date: dict[pd.Timestamp, pd.DataFrame],
+    market: pd.DataFrame,
+    test_dates: list[pd.Timestamp],
+    offset: int,
+    *,
+    regime_gate: bool,
+    top_n: int,
+    hold_days: int,
+    cost_per_side: float,
+    vix_threshold: float,
+) -> tuple[pd.Series, pd.Series]:
+    """Single backtest with rebalances on day `offset`, `offset+hold_days`, ...."""
+    weights: dict[str, float] = {}
+    equity = 1.0
+    equity_curve: dict[pd.Timestamp, float] = {}
+    in_market: dict[pd.Timestamp, bool] = {}
+
+    for i, date in enumerate(test_dates):
+        # 1. Apply today's return to current weights.
+        if weights and date in by_date:
+            day = by_date[date]
+            ret_map = dict(zip(day["ticker"], day["ret_1d"]))
+            pf_ret = sum(w * ret_map.get(t, 0.0) for t, w in weights.items())
+            equity *= 1.0 + pf_ret
+
+        # 2. Rebalance day?
+        is_rebalance = (i >= offset) and ((i - offset) % hold_days == 0)
+        if is_rebalance:
+            go_long = True
+            if regime_gate:
+                if date in market.index:
+                    go_long = _go_long_today(market.loc[date], vix_threshold)
+                else:
+                    go_long = False
+
+            if go_long and date in by_date:
+                day = by_date[date]
+                top = day.nlargest(top_n, "predicted_return")
+                new_weights = {t: 1.0 / top_n for t in top["ticker"]}
+            else:
+                new_weights = {}
+
+            all_tickers = set(new_weights) | set(weights)
+            turnover = sum(
+                abs(new_weights.get(t, 0.0) - weights.get(t, 0.0)) for t in all_tickers
+            )
+            equity *= 1.0 - turnover * cost_per_side
+            weights = new_weights
+
+        equity_curve[date] = equity
+        in_market[date] = bool(weights)
+
+    return (
+        pd.Series(equity_curve, name="equity"),
+        pd.Series(in_market, name="in_market"),
+    )
+
+
+def run_shifted_starts(
+    test_panel: pd.DataFrame,
+    market: pd.DataFrame,
+    *,
+    regime_gate: bool,
+    top_n: int,
+    hold_days: int,
+    cost_per_side: float,
+    vix_threshold: float,
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Run `hold_days` backtests at different rebalance offsets.
+
+    Returns (equity_df, time_in_market_per_offset). equity_df is wide:
+    rows=date, columns=offset.
+    """
+    test_dates = sorted(test_panel["date"].unique())
+    by_date = {
+        d: g[["ticker", "ret_1d", "predicted_return"]]
+        for d, g in test_panel.groupby("date")
+    }
+
+    curves: dict[int, pd.Series] = {}
+    tim: dict[int, float] = {}
+    for offset in range(hold_days):
+        eq, inm = run_one_offset(
+            by_date, market, test_dates, offset,
+            regime_gate=regime_gate, top_n=top_n, hold_days=hold_days,
+            cost_per_side=cost_per_side, vix_threshold=vix_threshold,
+        )
+        curves[offset] = eq
+        tim[offset] = float(inm.mean())
+
+    return pd.DataFrame(curves).sort_index(), pd.Series(tim, name="time_in_market")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Benchmark + stats
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def spy_buy_and_hold(market: pd.DataFrame, start: pd.Timestamp) -> pd.Series:
+    """SPY equity curve starting at NAV=1.0 from `start`."""
+    sub = market.loc[market.index >= start, "spy_ret_1d"].fillna(0.0)
+    return (1.0 + sub).cumprod().rename("spy")
+
+
+def compute_stats(equity: pd.Series) -> dict[str, float]:
+    """CAGR, ann vol, Sharpe (rf=0), max drawdown."""
+    daily_ret = equity.pct_change().dropna()
+    n_years = len(daily_ret) / PERIODS_PER_YEAR if len(daily_ret) > 0 else 1.0
+    final = float(equity.iloc[-1])
+    cagr = final ** (1.0 / n_years) - 1.0 if final > 0 else -1.0
+    ann_vol = float(daily_ret.std() * np.sqrt(PERIODS_PER_YEAR))
+    sharpe = cagr / ann_vol if ann_vol > 0 else 0.0
+
+    rolling_max = equity.cummax()
+    drawdown = (equity - rolling_max) / rolling_max
+    max_dd = float(drawdown.min())
+
+    return {
+        "cagr": float(cagr),
+        "ann_vol": ann_vol,
+        "sharpe": float(sharpe),
+        "max_dd": max_dd,
+        "final_nav": final,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Plot
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def plot_equity(
+    gated: pd.DataFrame,
+    raw: pd.DataFrame,
+    spy: pd.Series,
+    out_path: str,
+) -> None:
+    fig, ax = plt.subplots(figsize=(13, 7))
+
+    gated_mean = gated.mean(axis=1)
+    gated_lo = gated.quantile(0.10, axis=1)
+    gated_hi = gated.quantile(0.90, axis=1)
+    ax.plot(gated_mean.index, gated_mean.values,
+            label="Long-only + regime gate (mean of 21 offsets)",
+            color="C0", linewidth=2)
+    ax.fill_between(gated_mean.index, gated_lo.values, gated_hi.values,
+                    color="C0", alpha=0.18, label="gated 10–90% offset band")
+
+    raw_mean = raw.mean(axis=1)
+    ax.plot(raw_mean.index, raw_mean.values,
+            label="Long-only no gate (mean of 21 offsets)",
+            color="C1", linewidth=1.6, linestyle="--")
+
+    ax.plot(spy.index, spy.values, label="SPY buy & hold",
+            color="black", linewidth=1.4, alpha=0.7)
+
+    ax.set_title("Backtest equity curves vs SPY — test period 2021→")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Equity (start = 1.0)")
+    ax.legend(loc="upper left")
+    ax.grid(alpha=0.3)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _print_stats(label: str, stats: dict, extra: str = "") -> None:
+    print(
+        f"  {label:<32}  CAGR={stats['cagr']:+.2%}  "
+        f"Vol={stats['ann_vol']:.2%}  "
+        f"Sharpe={stats['sharpe']:+.2f}  "
+        f"MaxDD={stats['max_dd']:+.2%}  "
+        f"FinalNAV={stats['final_nav']:.3f}{extra}"
+    )
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--top-n", type=int, default=DEFAULT_TOP_N)
+    ap.add_argument("--hold-days", type=int, default=DEFAULT_HOLD_DAYS)
+    ap.add_argument("--cost-bps", type=float, default=DEFAULT_COST_PER_SIDE * 1e4,
+                    help="Cost per side in basis points (default 5).")
+    ap.add_argument("--vix-threshold", type=float, default=DEFAULT_VIX_THRESHOLD)
+    ap.add_argument("--no-overlay", action="store_true",
+                    help="Skip the gated variant (only run raw long-only + SPY).")
+    ap.add_argument("--model", default=MODEL_PATH)
+    args = ap.parse_args()
+
+    cost_per_side = args.cost_bps / 1e4
+
+    print("Loading panel and predicting on test set...")
+    panel = load_panel()
+    test_panel = predict_test(panel, args.model)
+    print(f"  test rows: {len(test_panel):,}  "
+          f"({test_panel['date'].min().date()} → {test_panel['date'].max().date()})")
+
+    market_data = load_market()
+    market = prepare_market(market_data["SPY"], market_data["VIX"])
+
+    gated_curves: pd.DataFrame | None = None
+    gated_tim: pd.Series | None = None
+    if not args.no_overlay:
+        print(f"Running long-only WITH regime gate "
+              f"(SPY>SMA200 AND VIX<{args.vix_threshold}, {args.hold_days} offsets)...")
+        gated_curves, gated_tim = run_shifted_starts(
+            test_panel, market,
+            regime_gate=True, top_n=args.top_n, hold_days=args.hold_days,
+            cost_per_side=cost_per_side, vix_threshold=args.vix_threshold,
+        )
+
+    print(f"Running long-only WITHOUT regime gate ({args.hold_days} offsets)...")
+    raw_curves, _ = run_shifted_starts(
+        test_panel, market,
+        regime_gate=False, top_n=args.top_n, hold_days=args.hold_days,
+        cost_per_side=cost_per_side, vix_threshold=args.vix_threshold,
+    )
+
+    test_start = pd.Timestamp(test_panel["date"].min())
+    spy_eq = spy_buy_and_hold(market, test_start)
+
+    stats: dict = {}
+    if gated_curves is not None:
+        gated_mean = gated_curves.mean(axis=1)
+        s = compute_stats(gated_mean)
+        s["avg_time_in_market"] = float(gated_tim.mean())
+        per_offset_cagrs = [
+            compute_stats(gated_curves[c])["cagr"] for c in gated_curves.columns
+        ]
+        s["offset_cagr_min"] = float(min(per_offset_cagrs))
+        s["offset_cagr_max"] = float(max(per_offset_cagrs))
+        stats["gated_long_only"] = s
+
+    raw_mean = raw_curves.mean(axis=1)
+    stats["raw_long_only"] = compute_stats(raw_mean)
+    stats["raw_long_only"]["avg_time_in_market"] = 1.0
+
+    stats["spy_buy_hold"] = compute_stats(spy_eq)
+
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+    with open(os.path.join(REPORTS_DIR, "backtest_stats.json"), "w") as f:
+        json.dump(stats, f, indent=2)
+
+    nav_df_cols: dict[str, pd.Series] = {"spy": spy_eq, "raw_long_only": raw_mean}
+    if gated_curves is not None:
+        nav_df_cols["gated_long_only"] = gated_curves.mean(axis=1)
+        nav_df_cols["gated_offset_p10"] = gated_curves.quantile(0.10, axis=1)
+        nav_df_cols["gated_offset_p90"] = gated_curves.quantile(0.90, axis=1)
+    nav_df = pd.DataFrame(nav_df_cols).sort_index()
+    nav_df.to_csv(os.path.join(REPORTS_DIR, "backtest_equity.csv"))
+
+    if gated_curves is not None:
+        plot_equity(
+            gated_curves, raw_curves, spy_eq,
+            os.path.join(REPORTS_DIR, "backtest_equity.png"),
+        )
+
+    print("\nBacktest summary:")
+    if "gated_long_only" in stats:
+        s = stats["gated_long_only"]
+        extra = (f"  TIM={s['avg_time_in_market']:.0%}  "
+                 f"CAGR offset range=[{s['offset_cagr_min']:+.2%}, "
+                 f"{s['offset_cagr_max']:+.2%}]")
+        _print_stats("gated long-only (regime ON)", s, extra)
+    _print_stats("raw long-only (regime OFF)", stats["raw_long_only"])
+    _print_stats("SPY buy & hold (benchmark)", stats["spy_buy_hold"])
+
+    print(f"\n  -> equity curve: {REPORTS_DIR}/backtest_equity.png")
+    print(f"  -> stats:        {REPORTS_DIR}/backtest_stats.json")
+    print(f"  -> daily NAV:    {REPORTS_DIR}/backtest_equity.csv")
 
 
 if __name__ == "__main__":
-    raise SystemExit("backtest.py not yet implemented")
+    main()

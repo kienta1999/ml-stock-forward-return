@@ -1,8 +1,10 @@
 # ml-stock-forward-return
 
-ML-based S&P 500 stock ranker. Predict each stock's forward 21-trading-day return
-independently with XGBoost, sort to get a daily ranking, long the top decile,
-hold ~1 month, rebalance daily via overlapping monthly sleeves.
+ML-based S&P 500 stock ranker. Predict each stock's forward 21-trading-day
+return independently with XGBoost, sort to get a daily ranking, long the top
+decile, hold 21 trading days, rebalance monthly with a SPY/VIX regime gate.
+Backtested on test 2021→ vs SPY buy-and-hold; gated variant +18.8% CAGR
+(Sharpe 0.91) vs SPY +14.5% (Sharpe 0.85). Survivorship caveat applies.
 
 This is the ranking-style sibling of `technical-analysis-stock-scanner`, which
 filters and picks. Here we score and sort.
@@ -18,8 +20,8 @@ filters and picks. Here we score and sort.
 | Features | 17 per-ticker + 8 market-context + 16 cross-sectional ranks + sector cat.                                  |
 | Label    | `close[t+21] / close[t] - 1`                                                                               |
 | Split    | Train 2007–2017, Val 2018–2020, Test 2021→. Chronological. No shuffling.                                   |
-| Model    | XGBoost regressor, RMSE loss, optuna-tuned on val IC                                                       |
-| Backtest | Daily predictions → rank → long top 10% equal-weight, 21d hold, 21 sleeves                                 |
+| Model    | XGBoost regressor, RMSE loss, optuna-tuned on val decile spread (max_depth ≤ 5)                            |
+| Backtest | Long-only top-50, monthly rebalance, regime gate (SPY > SMA200 AND VIX < 25), 21 shifted-start offsets     |
 | Costs    | 5 bps per side on rebalance turnover                                                                       |
 
 Every feature on row date=D uses only data observable at the close of D.
@@ -67,8 +69,11 @@ uv run python scripts/train.py                      # optuna tuning + final fit 
 uv run python scripts/train.py --trials 20          # faster tune
 uv run python scripts/train.py --quick              # skip tuning, use sane defaults
 
-# (the rest is stubbed — building piece by piece)
-# uv run python scripts/backtest.py
+uv run python scripts/backtest.py                    # long-only + gated, 21 shifted starts (~1 min)
+uv run python scripts/backtest.py --no-overlay       # skip gated variant
+uv run python scripts/backtest.py --top-n 25         # tighter pick (default 50)
+
+# (still stubbed)
 # uv run python scripts/evaluate.py
 ```
 
@@ -255,6 +260,91 @@ depth-3 trees, no single-tree dominance.
 
 ---
 
+## Backtest
+
+### Strategy (v1, long-only)
+
+Top-50 by predicted return (= top 10% of ~500 active S&P 500 names),
+equal-weighted, monthly rebalance, 21 trading day hold, 5 bps per side cost.
+Two variants run side-by-side:
+
+- **Gated** (recommended): `if SPY_close > SPY_SMA200 AND VIX_close < 25 → top 50; else cash.`
+  Trend-up + low-vol regime filter. ~77% time in market.
+- **Raw**: always long top 50. Diagnostic — what the model picks alone, no
+  market-timing overlay.
+
+### Rebalance-date sensitivity
+
+Monthly rebalance has a fragility: which day-of-month you happen to start
+matters. We mitigate by running the same strategy 21 times — each one
+starting on a different anchor day (offset = 0..20) — and reporting the
+mean equity curve plus the 10th/90th percentile band. Closely matches what
+21 overlapping sleeves would deliver, with much less code complexity.
+Sleeves are on the roadmap; this is the simpler-but-equivalent v1.
+
+### Results (test 2021-01-04 → 2026-03-26)
+
+| Variant                    | CAGR    | Vol    | Sharpe | Max DD  | Final NAV | Time-in-market |
+| -------------------------- | ------- | ------ | ------ | ------- | --------- | -------------- |
+| **Raw long-only**          | +26.2%  | 30.6%  | +0.86  | -35.5%  | 3.36×     | 100%           |
+| **Gated long-only**        | +18.8%  | 20.6%  | +0.91  | -27.4%  | 2.45×     | 77%            |
+| SPY buy & hold (benchmark) | +14.5%  | 17.0%  | +0.85  | -24.5%  | 2.05×     | —              |
+
+**Both variants beat SPY in absolute return.** Raw delivers higher CAGR
+(and higher drawdown); gated trades CAGR for risk-adjusted performance and
+a shallower drawdown.
+
+The gated variant is rebalance-date-sensitive (CAGR offset range ~+8% to
++29% across the 21 starting days). That spread is structural to monthly
+rebalance with a binary regime gate — sleeves would smooth it. The
+headline "+18.8%" is the mean across the 21 offsets.
+
+### Null test (sanity check on the alpha)
+
+Headline numbers can flatter — the universe is survivorship-biased and the
+test period favored growth/tech. To check the alpha isn't just universe +
+factor exposure, we replaced the model's predictions with two alternatives
+and re-ran the **raw** long-only backtest:
+
+| Predictions used                | CAGR    | Sharpe | Final NAV |
+| ------------------------------- | ------- | ------ | --------- |
+| **The model**                   | +26.2%  | +0.86  | 3.36×     |
+| Random (Gaussian noise)         | +12.9%  | +0.78  | 1.88×     |
+| Just `dist_52w_high` (1 factor) | +10.6%  | +0.74  | 1.69×     |
+| SPY buy & hold                  | +14.5%  | +0.85  | 2.05×     |
+
+Reading this:
+
+- **Random ≈ SPY**: equal-weighted random picks from our (current-S&P-500)
+  universe earn ~13% — the survivorship-bias floor. SPY's cap-weighting on
+  Mag 7 buys it a couple extra points.
+- **Naive momentum < SPY**: just chasing 52-week highs alone underperformed
+  in 2021–2026. So whatever the model does is **not** naive momentum.
+- **Model − random ≈ +13% CAGR**: this is the cleanest measure of true
+  alpha — the model's ranking adds 13 CAGR points over random ranking on
+  the same universe.
+
+### Caveats before believing the headline
+
+1. **Survivorship still inflates the absolute number.** The model-vs-random
+   gap (~13 CAGR points) should largely survive a point-in-time universe
+   (v2 TODO), but the absolute 26% CAGR almost certainly won't. Realistic
+   post-fix expectation: 15–20% CAGR raw, 12–15% gated.
+2. **Concentrated picks.** Across 63 rebalance days the strategy lands on
+   only 290 unique tickers, ~70% overlap between consecutive rebalances.
+   MRNA is picked 87% of the time, PLTR 78%, TSLA 73% — high-beta
+   growth/tech/COVID/meme names. Single-name blowups would hurt.
+3. **Period-specific regime.** 2021–2026 favored growth/tech/momentum.
+   Need backtests on different macro regimes to gauge robustness.
+
+### Outputs
+
+- `reports/backtest_equity.png` — equity curves vs SPY (mean + 10–90% offset band)
+- `reports/backtest_stats.json` — CAGR / Sharpe / MaxDD / time-in-market per variant
+- `reports/backtest_equity.csv` — daily NAV per variant (gated mean + offset bands, raw mean, SPY)
+
+---
+
 ## File layout
 
 ```
@@ -269,7 +359,8 @@ scripts/
   universe.py    data.py         # implemented
   features.py    labels.py       # implemented
   dataset.py     train.py        # implemented
-  backtest.py    evaluate.py     # stub
+  backtest.py                    # implemented (monthly rebalance + 21 shifted-start offsets)
+  evaluate.py                    # stub
   run_all.py                     # stub
 ```
 
@@ -293,13 +384,14 @@ scripts/
 
 ## TODOs
 
-- [ ] v2: point-in-time S&P 500 membership (kill survivorship bias)
+- [ ] v2: point-in-time S&P 500 membership (kill survivorship bias) — biggest single thing left to fix
 - [x] features.py
 - [x] labels.py
 - [x] dataset.py + lookahead sanity assertion
 - [x] train.py with hyperparameter tuning
-- [ ] backtest.py with overlapping 21-day sleeves
-- [ ] evaluate.py + plots
+- [x] backtest.py — monthly rebalance + 21 shifted-start offsets, regime gate, null test
+- [ ] upgrade backtest to overlapping 21-day sleeves (smooths the offset CAGR range)
+- [ ] evaluate.py + plots (per-month IC, drawdown plot, picks audit)
 - [ ] run_all.py orchestrator
 
 Paste this to claude to ask
