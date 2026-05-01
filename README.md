@@ -175,7 +175,7 @@ gives feature importances for free.
 | Role             | Metric                        | Why                                                                                                                                              |
 | ---------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Training loss    | **RMSE** (`reg:squarederror`) | XGBoost needs a smooth differentiable loss; RMSE is the default and gives stable gradients.                                                      |
-| Tuning objective | **mean daily IC** on val      | We're a ranker, not a forecaster. RMSE rewards getting magnitudes right; IC rewards getting the _order_ right — which is what the strategy uses. |
+| Tuning + early stopping | **mean daily IC** on val      | We're a ranker, not a forecaster. RMSE rewards getting magnitudes right; IC rewards getting the _order_ right — which is what the strategy uses. Both the optuna objective and the per-round early-stopping rule maximise val IC; keeping them aligned matters (see v1 results below). |
 | Reporting        | **RMSE + IC + decile spread** | Cross-checks: RMSE catches magnitude blow-ups, IC catches ranking quality, decile spread is the most direct proxy for strategy P&L.              |
 
 ### Hyperparameter search
@@ -192,10 +192,10 @@ Tuned with **optuna** (TPE sampler, ~50 trials). Knobs and ranges:
 | `colsample_bytree` | 0.6–1.0        | Feature sampling per tree. Same idea, on columns.                              |
 | `reg_lambda`       | 0.01–10 (log)  | L2 regularization on leaf weights.                                             |
 
-Each trial trains one model with early stopping (50 rounds on val RMSE) and
-returns mean daily val IC. Optuna picks the next combo to try based on what's
-worked so far. The final model is refit on the best params and saved to
-`models/xgb_v1.json`.
+Each trial trains one model with early stopping (50 rounds on val IC,
+maximize, save_best) and returns mean daily val IC. Optuna picks the next combo
+to try based on what's worked so far. The final model is refit on the best
+params and saved to `models/xgb_v1.json`.
 
 ### Outputs
 
@@ -203,6 +203,33 @@ worked so far. The final model is refit on the best params and saved to
 - `reports/feature_importance.csv` — per-feature gain importance
 - `reports/optuna_trials.csv` — full tuning history (params + IC per trial)
 - `reports/train_metrics.json` — final train/val RMSE + IC + decile spread + chosen params
+
+### v1 baseline results (val 2018–2020, 20-trial tune)
+
+| Metric                         | Value                  |
+| ------------------------------ | ---------------------- |
+| val IC (mean daily Spearman)   | +0.0523                |
+| val decile spread (top10 − bot10, 21d) | +0.0180 (~180 bps) |
+| train IC                       | +0.0522                |
+| val RMSE / train RMSE          | 0.1060 / 0.0891        |
+| best_iteration                 | 16                     |
+| chosen `max_depth`             | 3                      |
+| chosen `learning_rate`         | 0.220                  |
+
+Train and val IC are essentially identical → no overfitting gap. 180 bps of
+21d decile spread annualises (×~12 sleeves) to ~21% on the long-short spread,
+~10% long-only alpha before costs and survivorship correction. Real economics
+land after `backtest.py`.
+
+**Lesson learned**: early stopping must score the metric you tune on. The
+first cut of `train.py` stopped on val RMSE while tuning on val IC — that
+quietly forced every trial toward a single deep tree (depth 8,
+`best_iteration=1`), because RMSE bottoms early when predictions shrink toward
+zero. Switching early stopping to maximise val IC let the optuna search
+discover the depth-3 boosted-ensemble basin. IC barely moved (0.052 → 0.052),
+but **decile spread tripled (0.0064 → 0.0180)** — a much cleaner ranker even
+at the same rank correlation. Decile spread, not IC, was the metric that
+exposed the difference.
 
 ---
 
@@ -255,135 +282,3 @@ scripts/
 
 Paste this to claude to ask
 claude --resume b63b90f4-923f-419f-b30e-00cd9006952f
-
-```
-Loaded 2,396,643 rows; dropped 126,457 early-window NaN → 2,270,186 usable rows.
-Trimmed 49,871 pre-2007-01-01 buffer rows → 2,220,315 model-ready rows.
-
-Train: 1,207,798 rows  |  Val: 361,939 rows
-
-Running optuna (50 trials, maximize val IC)...
-
-  0%|          | 0/50 [00:00<?, ?it/s]
-Best trial: 0. Best value: 0.0170279:   0%|          | 0/50 [00:08<?, ?it/s]
-Best trial: 0. Best value: 0.0170279:   2%|▏         | 1/50 [00:08<07:10,  8.79s/it]
-Best trial: 1. Best value: 0.0517669:   2%|▏         | 1/50 [00:17<07:10,  8.79s/it]
-Best trial: 1. Best value: 0.0517669:   4%|▍         | 2/50 [00:17<07:10,  8.97s/it]
-Best trial: 1. Best value: 0.0517669:   4%|▍         | 2/50 [00:23<07:10,  8.97s/it]
-Best trial: 1. Best value: 0.0517669:   6%|▌         | 3/50 [00:23<05:49,  7.45s/it]
-Best trial: 1. Best value: 0.0517669:   6%|▌         | 3/50 [00:27<05:49,  7.45s/it]
-Best trial: 1. Best value: 0.0517669:   8%|▊         | 4/50 [00:27<04:46,  6.23s/it]
-Best trial: 1. Best value: 0.0517669:   8%|▊         | 4/50 [00:33<04:46,  6.23s/it]
-Best trial: 1. Best value: 0.0517669:  10%|█         | 5/50 [00:33<04:34,  6.10s/it]
-Best trial: 1. Best value: 0.0517669:  10%|█         | 5/50 [00:44<04:34,  6.10s/it]
-Best trial: 1. Best value: 0.0517669:  12%|█▏        | 6/50 [00:44<05:42,  7.79s/it]
-Best trial: 1. Best value: 0.0517669:  12%|█▏        | 6/50 [00:51<05:42,  7.79s/it]
-Best trial: 1. Best value: 0.0517669:  14%|█▍        | 7/50 [00:51<05:16,  7.37s/it]
-Best trial: 1. Best value: 0.0517669:  14%|█▍        | 7/50 [01:00<05:16,  7.37s/it]
-Best trial: 1. Best value: 0.0517669:  16%|█▌        | 8/50 [01:00<05:30,  7.86s/it]
-Best trial: 1. Best value: 0.0517669:  16%|█▌        | 8/50 [01:07<05:30,  7.86s/it]
-Best trial: 1. Best value: 0.0517669:  18%|█▊        | 9/50 [01:07<05:08,  7.52s/it]
-Best trial: 1. Best value: 0.0517669:  18%|█▊        | 9/50 [01:14<05:08,  7.52s/it]
-Best trial: 1. Best value: 0.0517669:  20%|██        | 10/50 [01:14<04:58,  7.46s/it]
-Best trial: 10. Best value: 0.0555798:  20%|██        | 10/50 [01:31<04:58,  7.46s/it]
-Best trial: 10. Best value: 0.0555798:  22%|██▏       | 11/50 [01:31<06:46, 10.41s/it]
-Best trial: 10. Best value: 0.0555798:  22%|██▏       | 11/50 [01:42<06:46, 10.41s/it]
-Best trial: 10. Best value: 0.0555798:  24%|██▍       | 12/50 [01:42<06:37, 10.46s/it]
-Best trial: 10. Best value: 0.0555798:  24%|██▍       | 12/50 [01:52<06:37, 10.46s/it]
-Best trial: 10. Best value: 0.0555798:  26%|██▌       | 13/50 [01:52<06:22, 10.33s/it]
-Best trial: 10. Best value: 0.0555798:  26%|██▌       | 13/50 [02:01<06:22, 10.33s/it]
-Best trial: 10. Best value: 0.0555798:  28%|██▊       | 14/50 [02:01<05:59,  9.98s/it]
-Best trial: 10. Best value: 0.0555798:  28%|██▊       | 14/50 [02:09<05:59,  9.98s/it]
-Best trial: 10. Best value: 0.0555798:  30%|███       | 15/50 [02:09<05:30,  9.44s/it]
-Best trial: 10. Best value: 0.0555798:  30%|███       | 15/50 [02:19<05:30,  9.44s/it]
-Best trial: 10. Best value: 0.0555798:  32%|███▏      | 16/50 [02:19<05:24,  9.54s/it]
-Best trial: 10. Best value: 0.0555798:  32%|███▏      | 16/50 [02:27<05:24,  9.54s/it]
-Best trial: 10. Best value: 0.0555798:  34%|███▍      | 17/50 [02:27<05:04,  9.23s/it]
-Best trial: 10. Best value: 0.0555798:  34%|███▍      | 17/50 [02:37<05:04,  9.23s/it]
-Best trial: 10. Best value: 0.0555798:  36%|███▌      | 18/50 [02:37<05:01,  9.43s/it]
-Best trial: 10. Best value: 0.0555798:  36%|███▌      | 18/50 [02:48<05:01,  9.43s/it]
-Best trial: 10. Best value: 0.0555798:  38%|███▊      | 19/50 [02:48<05:03,  9.80s/it]
-Best trial: 10. Best value: 0.0555798:  38%|███▊      | 19/50 [02:58<05:03,  9.80s/it]
-Best trial: 10. Best value: 0.0555798:  40%|████      | 20/50 [02:58<04:55,  9.86s/it]
-Best trial: 10. Best value: 0.0555798:  40%|████      | 20/50 [03:10<04:55,  9.86s/it]
-Best trial: 10. Best value: 0.0555798:  42%|████▏     | 21/50 [03:10<05:05, 10.52s/it]
-Best trial: 10. Best value: 0.0555798:  42%|████▏     | 21/50 [03:25<05:05, 10.52s/it]
-Best trial: 10. Best value: 0.0555798:  44%|████▍     | 22/50 [03:25<05:35, 12.00s/it]
-Best trial: 10. Best value: 0.0555798:  44%|████▍     | 22/50 [03:38<05:35, 12.00s/it]
-Best trial: 10. Best value: 0.0555798:  46%|████▌     | 23/50 [03:38<05:33, 12.35s/it]
-Best trial: 10. Best value: 0.0555798:  46%|████▌     | 23/50 [03:50<05:33, 12.35s/it]
-Best trial: 10. Best value: 0.0555798:  48%|████▊     | 24/50 [03:50<05:14, 12.10s/it]
-Best trial: 10. Best value: 0.0555798:  48%|████▊     | 24/50 [04:02<05:14, 12.10s/it]
-Best trial: 10. Best value: 0.0555798:  50%|█████     | 25/50 [04:02<05:00, 12.02s/it]
-Best trial: 10. Best value: 0.0555798:  50%|█████     | 25/50 [04:12<05:00, 12.02s/it]
-Best trial: 10. Best value: 0.0555798:  52%|█████▏    | 26/50 [04:12<04:37, 11.55s/it]
-Best trial: 10. Best value: 0.0555798:  52%|█████▏    | 26/50 [04:23<04:37, 11.55s/it]
-Best trial: 10. Best value: 0.0555798:  54%|█████▍    | 27/50 [04:23<04:22, 11.43s/it]
-Best trial: 10. Best value: 0.0555798:  54%|█████▍    | 27/50 [04:35<04:22, 11.43s/it]
-Best trial: 10. Best value: 0.0555798:  56%|█████▌    | 28/50 [04:35<04:11, 11.45s/it]
-Best trial: 10. Best value: 0.0555798:  56%|█████▌    | 28/50 [04:46<04:11, 11.45s/it]
-Best trial: 10. Best value: 0.0555798:  58%|█████▊    | 29/50 [04:46<03:58, 11.37s/it]
-Best trial: 10. Best value: 0.0555798:  58%|█████▊    | 29/50 [04:54<03:58, 11.37s/it]
-Best trial: 10. Best value: 0.0555798:  60%|██████    | 30/50 [04:54<03:28, 10.44s/it]
-Best trial: 10. Best value: 0.0555798:  60%|██████    | 30/50 [05:03<03:28, 10.44s/it]
-Best trial: 10. Best value: 0.0555798:  62%|██████▏   | 31/50 [05:03<03:09,  9.99s/it]
-Best trial: 10. Best value: 0.0555798:  62%|██████▏   | 31/50 [05:13<03:09,  9.99s/it]
-Best trial: 10. Best value: 0.0555798:  64%|██████▍   | 32/50 [05:13<02:59,  9.95s/it]
-Best trial: 10. Best value: 0.0555798:  64%|██████▍   | 32/50 [05:23<02:59,  9.95s/it]
-Best trial: 10. Best value: 0.0555798:  66%|██████▌   | 33/50 [05:23<02:46,  9.80s/it]
-Best trial: 10. Best value: 0.0555798:  66%|██████▌   | 33/50 [05:31<02:46,  9.80s/it]
-Best trial: 10. Best value: 0.0555798:  68%|██████▊   | 34/50 [05:31<02:30,  9.38s/it]
-Best trial: 10. Best value: 0.0555798:  68%|██████▊   | 34/50 [05:40<02:30,  9.38s/it]
-Best trial: 10. Best value: 0.0555798:  70%|███████   | 35/50 [05:40<02:18,  9.26s/it]
-Best trial: 10. Best value: 0.0555798:  70%|███████   | 35/50 [05:46<02:18,  9.26s/it]
-Best trial: 10. Best value: 0.0555798:  72%|███████▏  | 36/50 [05:46<01:57,  8.40s/it]
-Best trial: 10. Best value: 0.0555798:  72%|███████▏  | 36/50 [05:54<01:57,  8.40s/it]
-Best trial: 10. Best value: 0.0555798:  74%|███████▍  | 37/50 [05:54<01:47,  8.30s/it]
-Best trial: 10. Best value: 0.0555798:  74%|███████▍  | 37/50 [06:04<01:47,  8.30s/it]
-Best trial: 10. Best value: 0.0555798:  76%|███████▌  | 38/50 [06:04<01:43,  8.59s/it]
-Best trial: 10. Best value: 0.0555798:  76%|███████▌  | 38/50 [06:13<01:43,  8.59s/it]
-Best trial: 10. Best value: 0.0555798:  78%|███████▊  | 39/50 [06:13<01:37,  8.84s/it]
-Best trial: 10. Best value: 0.0555798:  78%|███████▊  | 39/50 [06:23<01:37,  8.84s/it]
-Best trial: 10. Best value: 0.0555798:  80%|████████  | 40/50 [06:23<01:32,  9.26s/it]
-Best trial: 10. Best value: 0.0555798:  80%|████████  | 40/50 [06:30<01:32,  9.26s/it]
-Best trial: 10. Best value: 0.0555798:  82%|████████▏ | 41/50 [06:30<01:17,  8.62s/it]
-Best trial: 10. Best value: 0.0555798:  82%|████████▏ | 41/50 [06:40<01:17,  8.62s/it]
-Best trial: 10. Best value: 0.0555798:  84%|████████▍ | 42/50 [06:40<01:11,  8.95s/it]
-Best trial: 10. Best value: 0.0555798:  84%|████████▍ | 42/50 [06:50<01:11,  8.95s/it]
-Best trial: 10. Best value: 0.0555798:  86%|████████▌ | 43/50 [06:50<01:03,  9.13s/it]
-Best trial: 10. Best value: 0.0555798:  86%|████████▌ | 43/50 [06:59<01:03,  9.13s/it]
-Best trial: 10. Best value: 0.0555798:  88%|████████▊ | 44/50 [06:59<00:55,  9.21s/it]
-Best trial: 10. Best value: 0.0555798:  88%|████████▊ | 44/50 [07:08<00:55,  9.21s/it]
-Best trial: 10. Best value: 0.0555798:  90%|█████████ | 45/50 [07:08<00:44,  8.98s/it]
-Best trial: 10. Best value: 0.0555798:  90%|█████████ | 45/50 [07:18<00:44,  8.98s/it]
-Best trial: 10. Best value: 0.0555798:  92%|█████████▏| 46/50 [07:18<00:37,  9.36s/it]
-Best trial: 10. Best value: 0.0555798:  92%|█████████▏| 46/50 [07:28<00:37,  9.36s/it]
-Best trial: 10. Best value: 0.0555798:  94%|█████████▍| 47/50 [07:28<00:28,  9.54s/it]
-Best trial: 10. Best value: 0.0555798:  94%|█████████▍| 47/50 [07:36<00:28,  9.54s/it]
-Best trial: 10. Best value: 0.0555798:  96%|█████████▌| 48/50 [07:36<00:18,  9.10s/it]
-Best trial: 10. Best value: 0.0555798:  96%|█████████▌| 48/50 [07:45<00:18,  9.10s/it]
-Best trial: 10. Best value: 0.0555798:  98%|█████████▊| 49/50 [07:45<00:09,  9.12s/it]
-Best trial: 10. Best value: 0.0555798:  98%|█████████▊| 49/50 [07:52<00:09,  9.12s/it]
-Best trial: 10. Best value: 0.0555798: 100%|██████████| 50/50 [07:52<00:00,  8.61s/it]
-Best trial: 10. Best value: 0.0555798: 100%|██████████| 50/50 [07:52<00:00,  9.46s/it]
-
-Best val IC during tuning: +0.0556
-Best params:
-  max_depth: 8
-  learning_rate: 0.09289825888463438
-  n_estimators: 976
-  min_child_weight: 1
-  subsample: 0.8607466203112715
-  colsample_bytree: 0.9630659181130071
-  reg_lambda: 0.01748488898051613
-
-Fitting final model with best params...
-
-Final metrics:
-  train RMSE: 0.0908   train IC: +0.1005
-  val   RMSE: 0.1047   val   IC: +0.0556   decile spread: +0.0064
-  best iteration: 1
-
-  -> model saved to /home/talekien1710/personal_project/ml-stock-forward-return/models/xgb_v1.json
-  -> reports saved to /home/talekien1710/personal_project/ml-stock-forward-return/reports/
-```

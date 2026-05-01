@@ -112,16 +112,43 @@ def decile_spread(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _make_model(params: dict) -> xgb.XGBRegressor:
-    """XGBoost regressor with native categorical (gics_sector) support."""
+def _make_ic_eval_metric(dates_val: np.ndarray):
+    """Closure that XGBoost calls as its eval metric on each boosting round.
+
+    Computes mean daily IC on the val set so early stopping picks the tree
+    count that maximises ranking quality, not RMSE. The inner function is
+    named ``ic`` because XGBoost's sklearn wrapper uses ``func.__name__`` as
+    the metric label — this is what ``EarlyStopping(metric_name="ic")`` matches.
+    """
+    def ic(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+        df = pd.DataFrame({"date": dates_val, "y_true": y_true, "y_pred": y_pred})
+        ics = df.groupby("date").apply(
+            lambda g: g["y_pred"].corr(g["y_true"], method="spearman") if len(g) > 1 else np.nan
+        )
+        return float(ics.mean())
+    return ic
+
+
+def _make_model(params: dict, dates_val: pd.Series) -> xgb.XGBRegressor:
+    """XGBoost regressor with native categorical (gics_sector) support.
+
+    Early stopping watches val IC (maximize, save_best) instead of RMSE — the
+    objective we tune on and the stopping rule now agree.
+    """
+    es = xgb.callback.EarlyStopping(
+        rounds=EARLY_STOPPING_ROUNDS,
+        metric_name="ic",
+        maximize=True,
+        save_best=True,
+    )
     return xgb.XGBRegressor(
         objective="reg:squarederror",
         tree_method="hist",
         enable_categorical=True,
         random_state=42,
         n_jobs=-1,
-        early_stopping_rounds=EARLY_STOPPING_ROUNDS,
-        eval_metric="rmse",
+        eval_metric=_make_ic_eval_metric(dates_val.to_numpy()),
+        callbacks=[es],
         **params,
     )
 
@@ -153,7 +180,7 @@ def _objective(
         "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
         "reg_lambda": trial.suggest_float("reg_lambda", 0.01, 10.0, log=True),
     }
-    model = _make_model(params)
+    model = _make_model(params, dates_val)
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
     y_pred = model.predict(X_val)
     return daily_ic(dates_val, y_val, y_pred)
@@ -195,7 +222,7 @@ def fit_and_evaluate(
     dates_train: pd.Series,
     dates_val: pd.Series,
 ) -> tuple[xgb.XGBRegressor, dict]:
-    model = _make_model(params)
+    model = _make_model(params, dates_val)
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
 
     y_train_pred = model.predict(X_train)
