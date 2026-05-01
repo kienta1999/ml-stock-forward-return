@@ -204,22 +204,30 @@ refit on the best params and saved to `models/xgb_v1.json`.
 - `reports/optuna_trials.csv` — full tuning history (params + IC per trial)
 - `reports/train_metrics.json` — final train/val RMSE + IC + decile spread + chosen params
 
-### v1 baseline results (val 2018–2020, 20-trial tune)
+### v1 baseline results (val 2018–2020, 20-trial tune, decile-spread objective)
 
 | Metric                         | Value                  |
 | ------------------------------ | ---------------------- |
-| val IC (mean daily Spearman)   | +0.0523                |
-| val decile spread (top10 − bot10, 21d) | +0.0180 (~180 bps) |
-| train IC                       | +0.0522                |
-| val RMSE / train RMSE          | 0.1060 / 0.0891        |
-| best_iteration                 | 16                     |
+| val decile spread (top10 − bot10, 21d) | **+0.0203 (~203 bps)** |
+| val IC (mean daily Spearman)   | +0.0298                |
+| train IC                       | +0.0495                |
+| val RMSE / train RMSE          | 0.1059 / 0.0891        |
+| best_iteration                 | 196                    |
 | chosen `max_depth`             | 3                      |
-| chosen `learning_rate`         | 0.220                  |
+| chosen `learning_rate`         | 0.019                  |
+| chosen `n_estimators`          | 443                    |
 
-Train and val IC are essentially identical → no overfitting gap. 180 bps of
-21d decile spread annualises (×~12 sleeves) to ~21% on the long-short spread,
-~10% long-only alpha before costs and survivorship correction. Real economics
-land after `backtest.py`.
+203 bps of 21d decile spread annualises (×~12 sleeves) to ~24% on the
+long-short spread, ~12% long-only alpha before costs and survivorship
+correction. Real economics land after `backtest.py`.
+
+Note that **val IC dropped from 0.052 → 0.030** vs the IC-tuned run, but
+**decile spread improved (0.018 → 0.020)** — exactly the disagreement that
+motivated the objective switch. The model is no longer chasing rank
+correlation it can't trade; it's directly optimising what the strategy
+captures. `best_iteration=196` (vs `16` previously) shows a real
+boosted-ensemble doing the work — slow `learning_rate=0.019` × 196 shallow
+depth-3 trees, no single-tree dominance.
 
 **Lessons learned along the way (two related misalignments)**:
 
@@ -227,28 +235,23 @@ land after `backtest.py`.
    `train.py` stopped on val RMSE while tuning on val IC. RMSE bottoms early
    because predictions shrink toward zero, so every trial got cut off at
    `best_iteration=1` — a single deep tree (depth 8). Switching early
-   stopping to a custom callable that returns mean daily IC (with
+   stopping to a custom callable that returns the val score (with
    `xgb.callback.EarlyStopping(maximize=True, save_best=True)`) let the
-   search find a depth-3 boosted-ensemble basin. **IC barely moved (0.052 →
-   0.052), but decile spread tripled (0.0064 → 0.0180.)**
+   search find a real boosted-ensemble basin instead of one fat tree.
 
 2. **Tune the metric the strategy actually trades.** With the alignment
-   above fixed, a 50-trial run still converged back to depth-8 — IC ticked
-   up to 0.0553 (best ever), but decile spread collapsed to 0.0070. Why:
-   depth-8 = 256 leaves per tree → ~1000 distinct predicted values across
-   1.2M val rows. Lots of clumping. Spearman handles ties OK and picks up a
-   bit more average ordering → IC up. But decile cuts pass through clumps
-   where stocks have nearly-identical predictions but very different
-   realised returns → top-decile and bottom-decile averages collapse
-   together → spread down. **Higher IC, worse strategy P&L.** Fix: tune on
-   decile spread directly, and cap `max_depth` at 5 to keep predictions
-   non-clumpy. Both early stopping and the optuna objective now maximise
-   val decile spread.
-
-The 20-trial baseline numbers in the table above were already in the
-`max_depth ≤ 5` basin (TPE landed on depth-3 by trial 6 with the IC
-objective). Re-running with the new tuning objective should sit in the same
-basin and push decile spread modestly higher with less variance across runs.
+   above fixed but the objective still set to IC, a 50-trial run converged
+   back to depth-8 — IC ticked up to 0.0553 (best ever), but decile spread
+   collapsed to 0.0070. Why: depth-8 = 256 leaves per tree → ~1000 distinct
+   predicted values across 1.2M val rows. Lots of clumping. Spearman handles
+   ties OK and picks up a bit more average ordering → IC up. But decile cuts
+   pass through clumps where stocks have nearly-identical predictions but
+   very different realised returns → top-decile and bottom-decile averages
+   collapse together → spread down. **Higher IC, worse strategy P&L.** Fix:
+   tune on decile spread directly, and cap `max_depth` at 5 to keep
+   predictions non-clumpy. Both early stopping and the optuna objective now
+   maximise val decile spread — the numbers in the table above are from
+   that configuration.
 
 ---
 
