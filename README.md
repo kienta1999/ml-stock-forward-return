@@ -175,7 +175,7 @@ gives feature importances for free.
 | Role             | Metric                        | Why                                                                                                                                              |
 | ---------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Training loss    | **RMSE** (`reg:squarederror`) | XGBoost needs a smooth differentiable loss; RMSE is the default and gives stable gradients.                                                      |
-| Tuning + early stopping | **mean daily IC** on val      | We're a ranker, not a forecaster. RMSE rewards getting magnitudes right; IC rewards getting the _order_ right — which is what the strategy uses. Both the optuna objective and the per-round early-stopping rule maximise val IC; keeping them aligned matters (see v1 results below). |
+| Tuning + early stopping | **mean daily decile spread** on val | We don't trade IC, we trade the top decile. IC and decile spread can disagree (deep trees can produce clumpy predictions with high IC but poor decile separation), so we score on the metric tied to P&L. Both the optuna objective and the per-round early-stopping rule maximise val decile spread; keeping them aligned matters (see v1 results below). |
 | Reporting        | **RMSE + IC + decile spread** | Cross-checks: RMSE catches magnitude blow-ups, IC catches ranking quality, decile spread is the most direct proxy for strategy P&L.              |
 
 ### Hyperparameter search
@@ -184,7 +184,7 @@ Tuned with **optuna** (TPE sampler, ~50 trials). Knobs and ranges:
 
 | Param              | Range          | What it controls                                                               |
 | ------------------ | -------------- | ------------------------------------------------------------------------------ |
-| `max_depth`        | 3–8            | Tree depth. Deeper = more interaction terms but more overfitting.              |
+| `max_depth`        | 3–5            | Tree depth. Capped at 5 — depth-8 trees produce clumpy predictions that score well on IC but collapse decile separation (see v1 lessons). |
 | `learning_rate`    | 0.01–0.3 (log) | How aggressively each tree corrects errors. Smaller + more trees usually wins. |
 | `n_estimators`     | 200–1000       | Max number of trees. Capped by early stopping.                                 |
 | `min_child_weight` | 1–20           | Minimum sum of sample weights per leaf. Higher = simpler trees.                |
@@ -192,10 +192,10 @@ Tuned with **optuna** (TPE sampler, ~50 trials). Knobs and ranges:
 | `colsample_bytree` | 0.6–1.0        | Feature sampling per tree. Same idea, on columns.                              |
 | `reg_lambda`       | 0.01–10 (log)  | L2 regularization on leaf weights.                                             |
 
-Each trial trains one model with early stopping (50 rounds on val IC,
-maximize, save_best) and returns mean daily val IC. Optuna picks the next combo
-to try based on what's worked so far. The final model is refit on the best
-params and saved to `models/xgb_v1.json`.
+Each trial trains one model with early stopping (50 rounds on val decile
+spread, maximize, save_best) and returns mean daily val decile spread. Optuna
+picks the next combo to try based on what's worked so far. The final model is
+refit on the best params and saved to `models/xgb_v1.json`.
 
 ### Outputs
 
@@ -221,15 +221,34 @@ Train and val IC are essentially identical → no overfitting gap. 180 bps of
 ~10% long-only alpha before costs and survivorship correction. Real economics
 land after `backtest.py`.
 
-**Lesson learned**: early stopping must score the metric you tune on. The
-first cut of `train.py` stopped on val RMSE while tuning on val IC — that
-quietly forced every trial toward a single deep tree (depth 8,
-`best_iteration=1`), because RMSE bottoms early when predictions shrink toward
-zero. Switching early stopping to maximise val IC let the optuna search
-discover the depth-3 boosted-ensemble basin. IC barely moved (0.052 → 0.052),
-but **decile spread tripled (0.0064 → 0.0180)** — a much cleaner ranker even
-at the same rank correlation. Decile spread, not IC, was the metric that
-exposed the difference.
+**Lessons learned along the way (two related misalignments)**:
+
+1. **Early stopping must score the metric you tune on.** First cut of
+   `train.py` stopped on val RMSE while tuning on val IC. RMSE bottoms early
+   because predictions shrink toward zero, so every trial got cut off at
+   `best_iteration=1` — a single deep tree (depth 8). Switching early
+   stopping to a custom callable that returns mean daily IC (with
+   `xgb.callback.EarlyStopping(maximize=True, save_best=True)`) let the
+   search find a depth-3 boosted-ensemble basin. **IC barely moved (0.052 →
+   0.052), but decile spread tripled (0.0064 → 0.0180.)**
+
+2. **Tune the metric the strategy actually trades.** With the alignment
+   above fixed, a 50-trial run still converged back to depth-8 — IC ticked
+   up to 0.0553 (best ever), but decile spread collapsed to 0.0070. Why:
+   depth-8 = 256 leaves per tree → ~1000 distinct predicted values across
+   1.2M val rows. Lots of clumping. Spearman handles ties OK and picks up a
+   bit more average ordering → IC up. But decile cuts pass through clumps
+   where stocks have nearly-identical predictions but very different
+   realised returns → top-decile and bottom-decile averages collapse
+   together → spread down. **Higher IC, worse strategy P&L.** Fix: tune on
+   decile spread directly, and cap `max_depth` at 5 to keep predictions
+   non-clumpy. Both early stopping and the optuna objective now maximise
+   val decile spread.
+
+The 20-trial baseline numbers in the table above were already in the
+`max_depth ≤ 5` basin (TPE landed on depth-3 by trial 6 with the IC
+objective). Re-running with the new tuning objective should sit in the same
+basin and push decile spread modestly higher with less variance across runs.
 
 ---
 

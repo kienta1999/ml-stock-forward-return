@@ -112,32 +112,42 @@ def decile_spread(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _make_ic_eval_metric(dates_val: np.ndarray):
+def _make_decile_spread_eval_metric(dates_val: np.ndarray, n_quantiles: int = 10):
     """Closure that XGBoost calls as its eval metric on each boosting round.
 
-    Computes mean daily IC on the val set so early stopping picks the tree
-    count that maximises ranking quality, not RMSE. The inner function is
-    named ``ic`` because XGBoost's sklearn wrapper uses ``func.__name__`` as
-    the metric label — this is what ``EarlyStopping(metric_name="ic")`` matches.
+    Computes mean daily decile spread on the val set so early stopping picks
+    the tree count that maximises the metric we actually trade on. The inner
+    function is named ``decile_spread`` because XGBoost's sklearn wrapper
+    uses ``func.__name__`` as the metric label — this is what
+    ``EarlyStopping(metric_name="decile_spread")`` matches.
     """
-    def ic(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    def decile_spread(y_true: np.ndarray, y_pred: np.ndarray) -> float:
         df = pd.DataFrame({"date": dates_val, "y_true": y_true, "y_pred": y_pred})
-        ics = df.groupby("date").apply(
-            lambda g: g["y_pred"].corr(g["y_true"], method="spearman") if len(g) > 1 else np.nan
-        )
-        return float(ics.mean())
-    return ic
+
+        def per_date(g: pd.DataFrame) -> float:
+            if len(g) < n_quantiles:
+                return np.nan
+            g_sorted = g.sort_values("y_pred")
+            bucket_size = len(g_sorted) // n_quantiles
+            bot = g_sorted.iloc[:bucket_size]["y_true"].mean()
+            top = g_sorted.iloc[-bucket_size:]["y_true"].mean()
+            return top - bot
+
+        return float(df.groupby("date").apply(per_date).mean())
+    return decile_spread
 
 
 def _make_model(params: dict, dates_val: pd.Series) -> xgb.XGBRegressor:
     """XGBoost regressor with native categorical (gics_sector) support.
 
-    Early stopping watches val IC (maximize, save_best) instead of RMSE — the
-    objective we tune on and the stopping rule now agree.
+    Early stopping watches val decile spread (maximize, save_best) — the
+    metric the strategy actually cares about. IC and decile spread can
+    disagree (e.g. depth-8 trees produce clumpy predictions with high IC
+    but poor decile separation), so we score on the one tied to P&L.
     """
     es = xgb.callback.EarlyStopping(
         rounds=EARLY_STOPPING_ROUNDS,
-        metric_name="ic",
+        metric_name="decile_spread",
         maximize=True,
         save_best=True,
     )
@@ -147,7 +157,7 @@ def _make_model(params: dict, dates_val: pd.Series) -> xgb.XGBRegressor:
         enable_categorical=True,
         random_state=42,
         n_jobs=-1,
-        eval_metric=_make_ic_eval_metric(dates_val.to_numpy()),
+        eval_metric=_make_decile_spread_eval_metric(dates_val.to_numpy()),
         callbacks=[es],
         **params,
     )
@@ -166,13 +176,16 @@ def _objective(
     y_val: pd.Series,
     dates_val: pd.Series,
 ) -> float:
-    """Train one model with the trial's hyperparameters; return val IC.
+    """Train one model with the trial's hyperparameters; return val decile spread.
 
     XGBoost's internal loss is RMSE (smooth gradient), but we score the model
-    by IC for hyperparameter selection — RMSE and IC differ for ranking tasks.
+    by decile spread — the strategy actually trades the top/bottom buckets,
+    not the rank-correlation order. ``max_depth`` is capped at 5 because
+    deeper trees produce clumpy predictions that score well on IC but
+    collapse decile separation (see README v1 results).
     """
     params = {
-        "max_depth": trial.suggest_int("max_depth", 3, 8),
+        "max_depth": trial.suggest_int("max_depth", 3, 5),
         "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
         "n_estimators": trial.suggest_int("n_estimators", 200, 1000),
         "min_child_weight": trial.suggest_int("min_child_weight", 1, 20),
@@ -183,7 +196,7 @@ def _objective(
     model = _make_model(params, dates_val)
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
     y_pred = model.predict(X_val)
-    return daily_ic(dates_val, y_val, y_pred)
+    return decile_spread(dates_val, y_val, y_pred)
 
 
 def tune(
