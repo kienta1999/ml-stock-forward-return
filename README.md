@@ -73,9 +73,35 @@ uv run python scripts/backtest.py                    # long-only + gated, 21 shi
 uv run python scripts/backtest.py --no-overlay       # skip gated variant
 uv run python scripts/backtest.py --top-n 25         # tighter pick (default 50)
 
+uv run python scripts/today.py                                   # latest-date picks (regime gate + top 50)
+uv run python scripts/today.py --diff picks/picks_YYYY-MM-DD.csv # buy/sell list vs that prior file
+uv run python scripts/today.py --no-overlay                      # ignore regime gate (diagnostic)
+
 # (still stubbed)
 # uv run python scripts/evaluate.py
 ```
+
+### Daily live-picks workflow
+
+`scripts/today.py` is what bridges the backtest model to actual trading. The
+backtest deliberately ignores the most recent ~21 trading days because they
+have no forward-return label yet; `today.py` deliberately predicts on them.
+
+```bash
+# every morning before market open:
+uv run python scripts/data.py        # incremental refresh from yfinance
+uv run python scripts/features.py    # rebuild features panel
+uv run python scripts/labels.py      # rebuild panel.parquet
+uv run python scripts/today.py --diff picks/picks_<yesterday>.csv
+```
+
+The `--diff` flag prints a BUY / SELL / HOLD ticket — exactly which tickers
+to add or drop today vs yesterday's picks. That's the trade list you'd
+execute (manually or via Alpaca API).
+
+Output lands in `picks/picks_<latest_date>.csv` (one file per run; gitignored
+to keep daily noise out of git). Cash days produce an empty picks file. The
+script warns if the panel is more than 7 days old.
 
 ### `data.py` CLI flags
 
@@ -367,12 +393,15 @@ data/
   market/SPY.parquet, VIX.parquet
   processed/                     # features.parquet, panel.parquet (later)
 models/xgb_v1.json               # trained booster
-reports/                         # equity curve, feature importance, metrics.json
+reports/                         # equity curve, feature importance, metrics.json (gitignored: png + json)
+picks/                           # daily picks_<date>.csv from scripts/today.py (gitignored)
 scripts/
   universe.py    data.py         # implemented
   features.py    labels.py       # implemented
   dataset.py     train.py        # implemented
   backtest.py                    # implemented (monthly rebalance + 21 shifted-start offsets)
+  strategy.py                    # shared primitives (model load, regime gate, top picks)
+  today.py                       # implemented — live picks for the most recent feature date
   evaluate.py                    # stub
   run_all.py                     # stub
 ```
@@ -403,6 +432,7 @@ scripts/
 - [x] dataset.py + lookahead sanity assertion
 - [x] train.py with hyperparameter tuning
 - [x] backtest.py — monthly rebalance + 21 shifted-start offsets, regime gate, null test
+- [x] today.py — live picks for the latest feature date, with `--diff` for daily BUY/SELL tickets
 - [ ] upgrade backtest to overlapping 21-day sleeves (smooths the offset CAGR range)
 - [ ] evaluate.py + plots (per-month IC, drawdown plot, picks audit)
 - [ ] run_all.py orchestrator
