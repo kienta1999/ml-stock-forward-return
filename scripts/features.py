@@ -32,7 +32,12 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from data import load_market, load_prices  # noqa: E402
-from universe import load_universe  # noqa: E402
+from universe import (  # noqa: E402
+    UNKNOWN_SECTOR,
+    filter_to_members,
+    load_history,
+    load_sectors,
+)
 
 _ROOT = os.path.dirname(_HERE)
 PANEL_PATH = os.path.join(_ROOT, "data", "processed", "features.parquet")
@@ -231,9 +236,11 @@ def build_panel(
     prices: dict[str, pd.DataFrame] | None = None,
     spy: pd.DataFrame | None = None,
     vix: pd.DataFrame | None = None,
-    universe: pd.DataFrame | None = None,
+    sectors: pd.DataFrame | None = None,
+    history: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Build the full long-format feature panel.
+    """Build the full long-format feature panel, filtered to point-in-time
+    S&P 500 membership.
 
     Columns (in order):
         date, ticker, gics_sector,
@@ -246,8 +253,10 @@ def build_panel(
         market = load_market()
         spy = market["SPY"] if spy is None else spy
         vix = market["VIX"] if vix is None else vix
-    if universe is None:
-        universe = load_universe()
+    if sectors is None:
+        sectors = load_sectors()
+    if history is None:
+        history = load_history()
 
     print(f"Computing features for {len(prices)} tickers...", flush=True)
     frames: list[pd.DataFrame] = []
@@ -259,9 +268,23 @@ def build_panel(
     panel = pd.concat(frames, axis=0)
     panel = panel.reset_index().rename(columns={"Date": "date"})
 
-    # Sector (Bucket 4, categorical).
-    sector_map = universe.set_index("Ticker")["GICS Sector"]
-    panel["gics_sector"] = panel["ticker"].map(sector_map).astype("category")
+    # Drop (date, ticker) rows where the ticker wasn't an S&P 500 member on
+    # date — this is what de-biases the backtest.
+    before = len(panel)
+    panel = filter_to_members(panel, history=history)
+    print(
+        f"Point-in-time filter: {before:,} → {len(panel):,} rows "
+        f"(dropped {before - len(panel):,} non-member observations).",
+        flush=True,
+    )
+
+    # Sector (Bucket 4, categorical). Wikipedia only knows current members;
+    # tickers that have since left the index get UNKNOWN_SECTOR rather than NaN
+    # so XGBoost's native categorical handling treats them as a real bucket.
+    sector_map = sectors.set_index("Ticker")["GICS Sector"]
+    panel["gics_sector"] = (
+        panel["ticker"].map(sector_map).fillna(UNKNOWN_SECTOR).astype("category")
+    )
 
     print("Computing cross-sectional ranks...", flush=True)
     panel = add_cross_sectional_ranks(panel)

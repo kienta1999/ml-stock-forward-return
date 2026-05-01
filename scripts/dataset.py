@@ -86,8 +86,9 @@ def load_panel(path: str = PANEL_PATH, drop_na: bool = True) -> pd.DataFrame:
 
     if drop_na:
         before = len(panel)
-        # Skip categorical (gics_sector) — NaN there means missing universe row,
-        # which is rare and its own problem.
+        # Skip categorical (gics_sector) — it has its own "Unknown" bucket for
+        # tickers Wikipedia doesn't tag; pandas dropna would treat the category
+        # column inconsistently anyway.
         numeric_required = [c for c in FEATURE_COLS if c not in CATEGORICAL_FEATURES]
         panel = panel.dropna(subset=numeric_required + [TARGET_COL]).reset_index(drop=True)
         print(

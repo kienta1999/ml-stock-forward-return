@@ -39,7 +39,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from universe import get_tickers  # noqa: E402
+from universe import all_historical_tickers  # noqa: E402
 
 _ROOT = os.path.dirname(_HERE)
 RAW_DIR = os.path.join(_ROOT, "data", "raw")
@@ -310,7 +310,10 @@ def main() -> None:
         if args.tickers:
             tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
         else:
-            tickers = get_tickers()
+            # Point-in-time universe: every ticker that's been in the S&P 500
+            # at any point since DEFAULT_START. Drives downloads only — the
+            # panel is filtered to actual membership-on-date in features.py.
+            tickers = all_historical_tickers(since=args.start)
         print(
             f"Fetching {len(tickers)} tickers from {args.start} "
             f"({WORKERS} workers, refresh={args.refresh})...",

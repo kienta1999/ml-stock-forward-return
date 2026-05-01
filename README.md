@@ -30,15 +30,18 @@ with `.loc[:date]` to verify this — it fails loud on leakage.
 
 ---
 
-## ⚠ Survivorship bias (known v1 caveat)
+## Point-in-time S&P 500 universe
 
-`universe.py` returns the **current** S&P 500 and applies that list backwards
-through the entire 2007→today range. Stocks that were in the index but later
-got removed (acquired, bankrupted, delisted) are silently absent. The backtest
-will look better than reality.
+`universe.py` reads `data/universe/SP_500_Historical_Component.csv` (from
+[fja05680/sp500](https://github.com/fja05680/sp500)) — a list of S&P 500
+change-events from 1996 onward. Each (date, ticker) row in the panel is
+filtered against the index membership in effect on that date, so stocks that
+were later acquired, bankrupted, or kicked out (Lehman, Enron, Eastman Kodak,
+…) are present for the dates they belonged and absent afterwards.
 
-**v2 fix**: replace with point-in-time index membership (a monthly snapshot of
-S&P 500 additions/removals).
+Sectors come from a separate Wikipedia scrape (`load_sectors`) and only cover
+the **current** roster; tickers that have since left the index get
+`gics_sector = "Unknown"`, which XGBoost treats as a normal category.
 
 ---
 
@@ -201,7 +204,7 @@ Why: a 30% trailing return in 2008 ≠ a 30% return in 2017. Ranks normalise out
 
 | Feature       | Source                                        | Purpose                                                                                                                                                               |
 | ------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `gics_sector` | `data/universe/sp500_members.csv` (Wikipedia) | XGBoost native categorical. Lets the model split on sector membership without manual encoding — captures effects like "utilities react differently to vol than tech." |
+| `gics_sector` | `data/universe/sp500_sectors.csv` (Wikipedia, current members) | XGBoost native categorical. Lets the model split on sector membership without manual encoding — captures effects like "utilities react differently to vol than tech." Tickers no longer in the index fall into the `"Unknown"` bucket. |
 
 ### Why some popular indicators are _not_ included
 
