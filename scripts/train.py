@@ -180,12 +180,15 @@ def _objective(
 
     XGBoost's internal loss is RMSE (smooth gradient), but we score the model
     by decile spread — the strategy actually trades the top/bottom buckets,
-    not the rank-correlation order. ``max_depth`` is capped at 5 because
-    deeper trees produce clumpy predictions that score well on IC but
-    collapse decile separation (see README v1 results).
+    not the rank-correlation order. ``max_depth`` is fixed at 3: depth-8
+    produces clumpy predictions that score well on IC but collapse decile
+    separation, and depth-4/5 give equivalent val spread to depth-3 (we
+    explored 3-5 in optuna and the basin is flat at the top, so we pick the
+    shallowest config — most trees, smoothest predictions, lowest single-tree
+    risk). See README v1 results.
     """
     params = {
-        "max_depth": trial.suggest_int("max_depth", 3, 5),
+        "max_depth": 3,
         "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
         "n_estimators": trial.suggest_int("n_estimators", 200, 1000),
         "min_child_weight": trial.suggest_int("min_child_weight", 1, 20),

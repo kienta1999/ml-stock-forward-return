@@ -118,12 +118,18 @@ def run_one_offset(
     hold_days: int,
     cost_per_side: float,
     vix_threshold: float,
-) -> tuple[pd.Series, pd.Series]:
-    """Single backtest with rebalances on day `offset`, `offset+hold_days`, ...."""
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Single backtest with rebalances on day `offset`, `offset+hold_days`, ....
+
+    Returns (equity, in_market, holdings). `holdings` is a Series of
+    comma-separated ticker strings (or "" when in cash) — useful for auditing
+    what the strategy actually held on each day.
+    """
     weights: dict[str, float] = {}
     equity = 1.0
     equity_curve: dict[pd.Timestamp, float] = {}
     in_market: dict[pd.Timestamp, bool] = {}
+    holdings: dict[pd.Timestamp, str] = {}
 
     for i, date in enumerate(test_dates):
         # 1. Apply today's return to current weights.
@@ -159,10 +165,12 @@ def run_one_offset(
 
         equity_curve[date] = equity
         in_market[date] = bool(weights)
+        holdings[date] = ",".join(sorted(weights.keys())) if weights else ""
 
     return (
         pd.Series(equity_curve, name="equity"),
         pd.Series(in_market, name="in_market"),
+        pd.Series(holdings, name="holdings"),
     )
 
 
@@ -175,11 +183,13 @@ def run_shifted_starts(
     hold_days: int,
     cost_per_side: float,
     vix_threshold: float,
-) -> tuple[pd.DataFrame, pd.Series]:
+) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
     """Run `hold_days` backtests at different rebalance offsets.
 
-    Returns (equity_df, time_in_market_per_offset). equity_df is wide:
-    rows=date, columns=offset.
+    Returns (equity_df, time_in_market_per_offset, holdings_offset_0).
+    equity_df is wide: rows=date, columns=offset. holdings_offset_0 is the
+    daily holdings (comma-separated tickers) for offset=0 only — one
+    representative pick log, kept tractable to write to CSV.
     """
     test_dates = sorted(test_panel["date"].unique())
     by_date = {
@@ -189,16 +199,23 @@ def run_shifted_starts(
 
     curves: dict[int, pd.Series] = {}
     tim: dict[int, float] = {}
+    holdings_offset_0: pd.Series | None = None
     for offset in range(hold_days):
-        eq, inm = run_one_offset(
+        eq, inm, hold = run_one_offset(
             by_date, market, test_dates, offset,
             regime_gate=regime_gate, top_n=top_n, hold_days=hold_days,
             cost_per_side=cost_per_side, vix_threshold=vix_threshold,
         )
         curves[offset] = eq
         tim[offset] = float(inm.mean())
+        if offset == 0:
+            holdings_offset_0 = hold
 
-    return pd.DataFrame(curves).sort_index(), pd.Series(tim, name="time_in_market")
+    return (
+        pd.DataFrame(curves).sort_index(),
+        pd.Series(tim, name="time_in_market"),
+        holdings_offset_0,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -315,17 +332,18 @@ def main() -> None:
 
     gated_curves: pd.DataFrame | None = None
     gated_tim: pd.Series | None = None
+    gated_holdings: pd.Series | None = None
     if not args.no_overlay:
         print(f"Running long-only WITH regime gate "
               f"(SPY>SMA200 AND VIX<{args.vix_threshold}, {args.hold_days} offsets)...")
-        gated_curves, gated_tim = run_shifted_starts(
+        gated_curves, gated_tim, gated_holdings = run_shifted_starts(
             test_panel, market,
             regime_gate=True, top_n=args.top_n, hold_days=args.hold_days,
             cost_per_side=cost_per_side, vix_threshold=args.vix_threshold,
         )
 
     print(f"Running long-only WITHOUT regime gate ({args.hold_days} offsets)...")
-    raw_curves, _ = run_shifted_starts(
+    raw_curves, _, raw_holdings = run_shifted_starts(
         test_panel, market,
         regime_gate=False, top_n=args.top_n, hold_days=args.hold_days,
         cost_per_side=cost_per_side, vix_threshold=args.vix_threshold,
@@ -361,6 +379,11 @@ def main() -> None:
         nav_df_cols["gated_long_only"] = gated_curves.mean(axis=1)
         nav_df_cols["gated_offset_p10"] = gated_curves.quantile(0.10, axis=1)
         nav_df_cols["gated_offset_p90"] = gated_curves.quantile(0.90, axis=1)
+    # Picks audit (offset 0 representative). Comma-separated tickers per day,
+    # "" when in cash. Lets you eyeball who got picked when without re-running.
+    if gated_holdings is not None:
+        nav_df_cols["gated_picks_offset0"] = gated_holdings
+    nav_df_cols["raw_picks_offset0"] = raw_holdings
     nav_df = pd.DataFrame(nav_df_cols).sort_index()
     nav_df.to_csv(os.path.join(REPORTS_DIR, "backtest_equity.csv"))
 

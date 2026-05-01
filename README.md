@@ -189,7 +189,7 @@ Tuned with **optuna** (TPE sampler, ~50 trials). Knobs and ranges:
 
 | Param              | Range          | What it controls                                                               |
 | ------------------ | -------------- | ------------------------------------------------------------------------------ |
-| `max_depth`        | 3–5            | Tree depth. Capped at 5 — depth-8 trees produce clumpy predictions that score well on IC but collapse decile separation (see v1 lessons). |
+| `max_depth`        | fixed at 3     | Depth-8 collapses decile separation (clumpy predictions); 3–5 give equivalent val spread, so we pick the shallowest — most trees, smoothest predictions. |
 | `learning_rate`    | 0.01–0.3 (log) | How aggressively each tree corrects errors. Smaller + more trees usually wins. |
 | `n_estimators`     | 200–1000       | Max number of trees. Capped by early stopping.                                 |
 | `min_child_weight` | 1–20           | Minimum sum of sample weights per leaf. Higher = simpler trees.                |
@@ -341,7 +341,20 @@ Reading this:
 
 - `reports/backtest_equity.png` — equity curves vs SPY (mean + 10–90% offset band)
 - `reports/backtest_stats.json` — CAGR / Sharpe / MaxDD / time-in-market per variant
-- `reports/backtest_equity.csv` — daily NAV per variant (gated mean + offset bands, raw mean, SPY)
+- `reports/backtest_equity.csv` — daily NAV per variant + the picks log:
+
+  | Column                  | What it is                                                                                                                                            |
+  | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | (index)                 | Trading date.                                                                                                                                         |
+  | `spy`                   | SPY buy-and-hold equity (NAV starting at 1.0). Pure benchmark, no rebalance.                                                                          |
+  | `raw_long_only`         | Strategy NAV with **no regime gate** (always 100% long top 50). Mean across the 21 shifted-start offsets.                                             |
+  | `gated_long_only`       | Strategy NAV with **regime gate ON** (SPY > SMA200 AND VIX < 25 → long; else cash). Mean across 21 offsets. Headline gated number.                    |
+  | `gated_offset_p10`      | 10th-percentile of gated equity across the 21 offsets — the unlucky-rebalance-day lower band.                                                         |
+  | `gated_offset_p90`      | 90th-percentile of gated equity across the 21 offsets — the lucky-rebalance-day upper band. Width = how rebalance-date-fragile the gated variant is.  |
+  | `gated_picks_offset0`   | Comma-separated tickers held by the gated variant at offset 0 (one representative offset). Empty when the gate said "cash".                           |
+  | `raw_picks_offset0`     | Same for the raw variant. Always populated since raw is never in cash.                                                                                |
+
+  Only offset 0's picks are saved; writing all 21 offsets' picks would balloon the CSV. The other 20 offsets pick mostly-overlapping baskets (~70% consecutive overlap), so offset 0 is a reasonable representative.
 
 ---
 
