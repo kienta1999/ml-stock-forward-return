@@ -103,14 +103,14 @@ code, so it's cron-friendly.
 
 Modes:
 
-| Command | What runs |
-| ------- | --------- |
-| `run_all.py` | data → features → labels → today (default daily) |
-| `run_all.py --retrain` | also train + backtest |
-| `run_all.py --full` | also refresh universe first (`--retrain` implied) |
-| `run_all.py --no-today` | refresh + optional retrain only, skip live picks |
-| `run_all.py --no-diff` | run today.py without `--diff` |
-| `run_all.py --dry-run` | print the plan, don't execute |
+| Command                 | What runs                                         |
+| ----------------------- | ------------------------------------------------- |
+| `run_all.py`            | data → features → labels → today (default daily)  |
+| `run_all.py --retrain`  | also train + backtest                             |
+| `run_all.py --full`     | also refresh universe first (`--retrain` implied) |
+| `run_all.py --no-today` | refresh + optional retrain only, skip live picks  |
+| `run_all.py --no-diff`  | run today.py without `--diff`                     |
+| `run_all.py --dry-run`  | print the plan, don't execute                     |
 
 Equivalent manual sequence (if you want to run pieces individually):
 
@@ -229,25 +229,25 @@ gives feature importances for free.
 
 ### Three roles, two metrics
 
-| Role             | Metric                        | Why                                                                                                                                              |
-| ---------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Training loss    | **RMSE** (`reg:squarederror`) | XGBoost needs a smooth differentiable loss; RMSE is the default and gives stable gradients.                                                      |
+| Role                    | Metric                              | Why                                                                                                                                                                                                                                                                                                                                                        |
+| ----------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Training loss           | **RMSE** (`reg:squarederror`)       | XGBoost needs a smooth differentiable loss; RMSE is the default and gives stable gradients.                                                                                                                                                                                                                                                                |
 | Tuning + early stopping | **mean daily decile spread** on val | We don't trade IC, we trade the top decile. IC and decile spread can disagree (deep trees can produce clumpy predictions with high IC but poor decile separation), so we score on the metric tied to P&L. Both the optuna objective and the per-round early-stopping rule maximise val decile spread; keeping them aligned matters (see v1 results below). |
-| Reporting        | **RMSE + IC + decile spread** | Cross-checks: RMSE catches magnitude blow-ups, IC catches ranking quality, decile spread is the most direct proxy for strategy P&L.              |
+| Reporting               | **RMSE + IC + decile spread**       | Cross-checks: RMSE catches magnitude blow-ups, IC catches ranking quality, decile spread is the most direct proxy for strategy P&L.                                                                                                                                                                                                                        |
 
 ### Hyperparameter search
 
 Tuned with **optuna** (TPE sampler, ~50 trials). Knobs and ranges:
 
-| Param              | Range          | What it controls                                                               |
-| ------------------ | -------------- | ------------------------------------------------------------------------------ |
+| Param              | Range          | What it controls                                                                                                                                         |
+| ------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `max_depth`        | fixed at 3     | Depth-8 collapses decile separation (clumpy predictions); 3–5 give equivalent val spread, so we pick the shallowest — most trees, smoothest predictions. |
-| `learning_rate`    | 0.01–0.3 (log) | How aggressively each tree corrects errors. Smaller + more trees usually wins. |
-| `n_estimators`     | 200–1000       | Max number of trees. Capped by early stopping.                                 |
-| `min_child_weight` | 1–20           | Minimum sum of sample weights per leaf. Higher = simpler trees.                |
-| `subsample`        | 0.6–1.0        | Row sampling per tree. <1 adds randomness → robustness.                        |
-| `colsample_bytree` | 0.6–1.0        | Feature sampling per tree. Same idea, on columns.                              |
-| `reg_lambda`       | 0.01–10 (log)  | L2 regularization on leaf weights.                                             |
+| `learning_rate`    | 0.01–0.3 (log) | How aggressively each tree corrects errors. Smaller + more trees usually wins.                                                                           |
+| `n_estimators`     | 200–1000       | Max number of trees. Capped by early stopping.                                                                                                           |
+| `min_child_weight` | 1–20           | Minimum sum of sample weights per leaf. Higher = simpler trees.                                                                                          |
+| `subsample`        | 0.6–1.0        | Row sampling per tree. <1 adds randomness → robustness.                                                                                                  |
+| `colsample_bytree` | 0.6–1.0        | Feature sampling per tree. Same idea, on columns.                                                                                                        |
+| `reg_lambda`       | 0.01–10 (log)  | L2 regularization on leaf weights.                                                                                                                       |
 
 Each trial trains one model with early stopping (50 rounds on val decile
 spread, maximize, save_best) and returns mean daily val decile spread. Optuna
@@ -263,16 +263,16 @@ refit on the best params and saved to `models/xgb_v1.json`.
 
 ### v1 baseline results (val 2018–2020, 20-trial tune, decile-spread objective)
 
-| Metric                         | Value                  |
-| ------------------------------ | ---------------------- |
+| Metric                                 | Value                  |
+| -------------------------------------- | ---------------------- |
 | val decile spread (top10 − bot10, 21d) | **+0.0203 (~203 bps)** |
-| val IC (mean daily Spearman)   | +0.0298                |
-| train IC                       | +0.0495                |
-| val RMSE / train RMSE          | 0.1059 / 0.0891        |
-| best_iteration                 | 196                    |
-| chosen `max_depth`             | 3                      |
-| chosen `learning_rate`         | 0.019                  |
-| chosen `n_estimators`          | 443                    |
+| val IC (mean daily Spearman)           | +0.0298                |
+| train IC                               | +0.0495                |
+| val RMSE / train RMSE                  | 0.1059 / 0.0891        |
+| best_iteration                         | 196                    |
+| chosen `max_depth`                     | 3                      |
+| chosen `learning_rate`                 | 0.019                  |
+| chosen `n_estimators`                  | 443                    |
 
 203 bps of 21d decile spread annualises (×~12 sleeves) to ~24% on the
 long-short spread, ~12% long-only alpha before costs and survivorship
@@ -336,11 +336,11 @@ Sleeves are on the roadmap; this is the simpler-but-equivalent v1.
 
 ### Results (test 2021-01-04 → 2026-03-26)
 
-| Variant                    | CAGR    | Vol    | Sharpe | Max DD  | Final NAV | Time-in-market |
-| -------------------------- | ------- | ------ | ------ | ------- | --------- | -------------- |
-| **Raw long-only**          | +26.2%  | 30.6%  | +0.86  | -35.5%  | 3.36×     | 100%           |
-| **Gated long-only**        | +18.8%  | 20.6%  | +0.91  | -27.4%  | 2.45×     | 77%            |
-| SPY buy & hold (benchmark) | +14.5%  | 17.0%  | +0.85  | -24.5%  | 2.05×     | —              |
+| Variant                    | CAGR   | Vol   | Sharpe | Max DD | Final NAV | Time-in-market |
+| -------------------------- | ------ | ----- | ------ | ------ | --------- | -------------- |
+| **Raw long-only**          | +26.2% | 30.6% | +0.86  | -35.5% | 3.36×     | 100%           |
+| **Gated long-only**        | +18.8% | 20.6% | +0.91  | -27.4% | 2.45×     | 77%            |
+| SPY buy & hold (benchmark) | +14.5% | 17.0% | +0.85  | -24.5% | 2.05×     | —              |
 
 **Both variants beat SPY in absolute return.** Raw delivers higher CAGR
 (and higher drawdown); gated trades CAGR for risk-adjusted performance and
@@ -358,12 +358,12 @@ test period favored growth/tech. To check the alpha isn't just universe +
 factor exposure, we replaced the model's predictions with two alternatives
 and re-ran the **raw** long-only backtest:
 
-| Predictions used                | CAGR    | Sharpe | Final NAV |
-| ------------------------------- | ------- | ------ | --------- |
-| **The model**                   | +26.2%  | +0.86  | 3.36×     |
-| Random (Gaussian noise)         | +12.9%  | +0.78  | 1.88×     |
-| Just `dist_52w_high` (1 factor) | +10.6%  | +0.74  | 1.69×     |
-| SPY buy & hold                  | +14.5%  | +0.85  | 2.05×     |
+| Predictions used                | CAGR   | Sharpe | Final NAV |
+| ------------------------------- | ------ | ------ | --------- |
+| **The model**                   | +26.2% | +0.86  | 3.36×     |
+| Random (Gaussian noise)         | +12.9% | +0.78  | 1.88×     |
+| Just `dist_52w_high` (1 factor) | +10.6% | +0.74  | 1.69×     |
+| SPY buy & hold                  | +14.5% | +0.85  | 2.05×     |
 
 Reading this:
 
@@ -395,18 +395,18 @@ Reading this:
 - `reports/backtest_stats.json` — CAGR / Sharpe / MaxDD / time-in-market per variant
 - `reports/backtest_equity.csv` — daily NAV per variant + the picks log:
 
-  | Column                  | What it is                                                                                                                                            |
-  | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-  | (index)                 | Trading date.                                                                                                                                         |
-  | `spy`                   | SPY buy-and-hold equity (NAV starting at 1.0). Pure benchmark, no rebalance.                                                                          |
-  | `raw_long_only`         | Strategy NAV with **no regime gate** (always 100% long top 50). Mean across the 21 shifted-start offsets.                                             |
-  | `gated_long_only`       | Strategy NAV with **regime gate ON** (SPY > SMA200 AND VIX < 25 → long; else cash). Mean across 21 offsets. Headline gated number.                    |
-  | `gated_offset_p10`      | 10th-percentile of gated equity across the 21 offsets — the unlucky-rebalance-day lower band.                                                         |
-  | `gated_offset_p90`      | 90th-percentile of gated equity across the 21 offsets — the lucky-rebalance-day upper band. Width = how rebalance-date-fragile the gated variant is.  |
-  | `gated_picks_offset0`   | Comma-separated tickers held by the gated variant at offset 0 (one representative offset). Empty when the gate said "cash".                           |
-  | `raw_picks_offset0`     | Same for the raw variant. Always populated since raw is never in cash.                                                                                |
+    | Column                | What it is                                                                                                                                           |
+    | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+    | (index)               | Trading date.                                                                                                                                        |
+    | `spy`                 | SPY buy-and-hold equity (NAV starting at 1.0). Pure benchmark, no rebalance.                                                                         |
+    | `raw_long_only`       | Strategy NAV with **no regime gate** (always 100% long top 50). Mean across the 21 shifted-start offsets.                                            |
+    | `gated_long_only`     | Strategy NAV with **regime gate ON** (SPY > SMA200 AND VIX < 25 → long; else cash). Mean across 21 offsets. Headline gated number.                   |
+    | `gated_offset_p10`    | 10th-percentile of gated equity across the 21 offsets — the unlucky-rebalance-day lower band.                                                        |
+    | `gated_offset_p90`    | 90th-percentile of gated equity across the 21 offsets — the lucky-rebalance-day upper band. Width = how rebalance-date-fragile the gated variant is. |
+    | `gated_picks_offset0` | Comma-separated tickers held by the gated variant at offset 0 (one representative offset). Empty when the gate said "cash".                          |
+    | `raw_picks_offset0`   | Same for the raw variant. Always populated since raw is never in cash.                                                                               |
 
-  Only offset 0's picks are saved; writing all 21 offsets' picks would balloon the CSV. The other 20 offsets pick mostly-overlapping baskets (~70% consecutive overlap), so offset 0 is a reasonable representative.
+    Only offset 0's picks are saved; writing all 21 offsets' picks would balloon the CSV. The other 20 offsets pick mostly-overlapping baskets (~70% consecutive overlap), so offset 0 is a reasonable representative.
 
 ---
 
@@ -493,6 +493,7 @@ fragility, becomes the realistic live-trading mechanic.
 backtest.py reports summary stats; the interesting questions need slicing.
 
 **What to build** (probably `scripts/diagnostics.py`):
+
 - Per-month IC time series + t-stat + % of months positive — is the alpha
   stable, or driven by 2 outlier months?
 - Underwater plot — when did drawdowns happen, how long did they last,
@@ -510,6 +511,7 @@ val decile spread ~0.02). The next ~50 bps of IC won't come from
 hyperparameter tuning — it'll come from new signals.
 
 Candidates to try:
+
 - **Fundamentals**: trailing P/E, P/S, EV/EBITDA, FCF yield, ROIC. Quarterly
   cadence so leakage discipline is harder; needs careful as-of dating.
 - **Earnings/event flags**: days-to-next-earnings, post-earnings drift window.
@@ -537,3 +539,4 @@ Candidates to try:
 
 Paste this to claude to ask
 claude --resume b63b90f4-923f-419f-b30e-00cd9006952f
+claude --resume 7762f7ea-721e-4179-a24b-273d86c65f0e
