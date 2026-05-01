@@ -97,17 +97,13 @@ def _print_picks(picks_df: pd.DataFrame, latest_date: pd.Timestamp, top_n: int) 
     print(f"\n  Avg predicted 21d return for the basket: {avg_pred:+.2%}")
 
 
-def _print_diff(picks_df: pd.DataFrame, prev_path: str) -> None:
-    if not os.path.exists(prev_path):
-        print(f"\n  ⚠ --diff file {prev_path} does not exist; skipping")
-        return
-    prev = pd.read_csv(prev_path)
+def _print_diff(picks_df: pd.DataFrame, prev: pd.DataFrame, prev_label: str) -> None:
     prev_set = set(prev["ticker"]) if not prev.empty else set()
     curr_set = set(picks_df["ticker"]) if not picks_df.empty else set()
     sells = sorted(prev_set - curr_set)
     buys = sorted(curr_set - prev_set)
     unchanged = sorted(prev_set & curr_set)
-    print(f"\n=== DIFF vs {os.path.basename(prev_path)} ===")
+    print(f"\n=== DIFF vs {prev_label} ===")
     print(f"  SELL ({len(sells):>2}): {', '.join(sells) if sells else '(none)'}")
     print(f"  BUY  ({len(buys):>2}): {', '.join(buys) if buys else '(none)'}")
     print(f"  HOLD ({len(unchanged):>2}): {len(unchanged)} tickers unchanged")
@@ -133,6 +129,17 @@ def main() -> None:
     )
     ap.add_argument("--model", default=MODEL_PATH)
     args = ap.parse_args()
+
+    # Load --diff file BEFORE we write the new picks: today's filename is
+    # picks_<latest_feature_date>.csv, and on a same-day rerun this can
+    # collide with the --diff source (we'd be diffing against ourselves).
+    # Reading first preserves the prior state in memory regardless.
+    prev_picks: pd.DataFrame | None = None
+    if args.diff:
+        if os.path.exists(args.diff):
+            prev_picks = pd.read_csv(args.diff)
+        else:
+            print(f"  ⚠ --diff file {args.diff} does not exist; will skip diff")
 
     print("Loading panel and predicting today's slice...")
     panel = load_panel(drop_na=False)
@@ -174,8 +181,8 @@ def main() -> None:
     picks_df.to_csv(out_path, index=False)
     print(f"\n  -> picks saved to {out_path}")
 
-    if args.diff:
-        _print_diff(picks_df, args.diff)
+    if prev_picks is not None:
+        _print_diff(picks_df, prev_picks, os.path.basename(args.diff))
 
 
 if __name__ == "__main__":

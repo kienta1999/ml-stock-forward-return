@@ -76,6 +76,11 @@ uv run python scripts/backtest.py --top-n 25         # tighter pick (default 50)
 uv run python scripts/today.py                                   # latest-date picks (regime gate + top 50)
 uv run python scripts/today.py --diff picks/picks_YYYY-MM-DD.csv # buy/sell list vs that prior file
 uv run python scripts/today.py --no-overlay                      # ignore regime gate (diagnostic)
+
+uv run python scripts/run_all.py                  # daily: data → features → labels → today (auto --diff)
+uv run python scripts/run_all.py --retrain        # also: train + backtest
+uv run python scripts/run_all.py --full           # also: refresh universe first
+uv run python scripts/run_all.py --dry-run        # print plan, don't execute
 ```
 
 ### Daily live-picks workflow
@@ -84,21 +89,45 @@ uv run python scripts/today.py --no-overlay                      # ignore regime
 backtest deliberately ignores the most recent ~21 trading days because they
 have no forward-return label yet; `today.py` deliberately predicts on them.
 
+The orchestrator `scripts/run_all.py` chains the daily pipeline together:
+
 ```bash
-# every morning before market open:
-uv run python scripts/data.py        # incremental refresh from yfinance
-uv run python scripts/features.py    # rebuild features panel
-uv run python scripts/labels.py      # rebuild panel.parquet
+# every morning before market open — one command:
+uv run python scripts/run_all.py
+```
+
+That runs `data.py → features.py → labels.py → today.py` end-to-end, stops
+on the first failure, and auto-supplies `--diff` to `today.py` using the
+most recent prior file in `picks/`. Exit code is the failed step's exit
+code, so it's cron-friendly.
+
+Modes:
+
+| Command | What runs |
+| ------- | --------- |
+| `run_all.py` | data → features → labels → today (default daily) |
+| `run_all.py --retrain` | also train + backtest |
+| `run_all.py --full` | also refresh universe first (`--retrain` implied) |
+| `run_all.py --no-today` | refresh + optional retrain only, skip live picks |
+| `run_all.py --no-diff` | run today.py without `--diff` |
+| `run_all.py --dry-run` | print the plan, don't execute |
+
+Equivalent manual sequence (if you want to run pieces individually):
+
+```bash
+uv run python scripts/data.py
+uv run python scripts/features.py
+uv run python scripts/labels.py
 uv run python scripts/today.py --diff picks/picks_<yesterday>.csv
 ```
 
 The `--diff` flag prints a BUY / SELL / HOLD ticket — exactly which tickers
-to add or drop today vs yesterday's picks. That's the trade list you'd
+to add or drop today vs the prior picks. That's the trade list you'd
 execute (manually or via Alpaca API).
 
-Output lands in `picks/picks_<latest_date>.csv` (one file per run; gitignored
-to keep daily noise out of git). Cash days produce an empty picks file. The
-script warns if the panel is more than 7 days old.
+Output lands in `picks/picks_<latest_date>.csv` (one file per run;
+gitignored to keep daily noise out of git). Cash days produce an empty
+picks file. The script warns if the panel is more than 7 days old.
 
 ### `data.py` CLI flags
 
@@ -399,7 +428,7 @@ scripts/
   backtest.py                    # implemented (monthly rebalance + 21 shifted-start offsets)
   strategy.py                    # shared primitives (model load, regime gate, top picks)
   today.py                       # implemented — live picks for the most recent feature date
-  run_all.py                     # stub
+  run_all.py                     # implemented — daily orchestrator (data → features → labels → today)
 ```
 
 ---
@@ -491,13 +520,6 @@ Candidates to try:
 - **Short interest / borrow rate**: contrarian signal, especially for
   high-vol names.
 
-### 5. `run_all.py` orchestrator
-
-Once the daily pipeline is stable, a single command that runs `data.py →
-features.py → labels.py → today.py --diff <yesterday>`. Handles errors
-gracefully, exits with the right status code for cron. Cheap to build but
-only worth doing after the upstream pieces are stable.
-
 ---
 
 ## TODOs
@@ -511,7 +533,7 @@ only worth doing after the upstream pieces are stable.
 - [x] today.py — live picks for the latest feature date, with `--diff` for daily BUY/SELL tickets
 - [ ] upgrade backtest to overlapping 21-day sleeves (smooths the offset CAGR range)
 - [ ] diagnostics: per-month IC stability, underwater plot, picks-concentration audit, per-stock attribution
-- [ ] run_all.py orchestrator
+- [x] run_all.py orchestrator — daily and retrain modes, auto --diff for today.py
 
 Paste this to claude to ask
 claude --resume b63b90f4-923f-419f-b30e-00cd9006952f
