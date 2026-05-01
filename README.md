@@ -76,9 +76,6 @@ uv run python scripts/backtest.py --top-n 25         # tighter pick (default 50)
 uv run python scripts/today.py                                   # latest-date picks (regime gate + top 50)
 uv run python scripts/today.py --diff picks/picks_YYYY-MM-DD.csv # buy/sell list vs that prior file
 uv run python scripts/today.py --no-overlay                      # ignore regime gate (diagnostic)
-
-# (still stubbed)
-# uv run python scripts/evaluate.py
 ```
 
 ### Daily live-picks workflow
@@ -402,7 +399,6 @@ scripts/
   backtest.py                    # implemented (monthly rebalance + 21 shifted-start offsets)
   strategy.py                    # shared primitives (model load, regime gate, top picks)
   today.py                       # implemented — live picks for the most recent feature date
-  evaluate.py                    # stub
   run_all.py                     # stub
 ```
 
@@ -434,7 +430,7 @@ scripts/
 - [x] backtest.py — monthly rebalance + 21 shifted-start offsets, regime gate, null test
 - [x] today.py — live picks for the latest feature date, with `--diff` for daily BUY/SELL tickets
 - [ ] upgrade backtest to overlapping 21-day sleeves (smooths the offset CAGR range)
-- [ ] evaluate.py + plots (per-month IC, drawdown plot, picks audit)
+- [ ] diagnostics: per-month IC stability, underwater plot, picks-concentration audit, per-stock attribution
 - [ ] run_all.py orchestrator
 
 Paste this to claude to ask
