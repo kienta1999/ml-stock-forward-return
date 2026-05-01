@@ -3,8 +3,9 @@
 ML-based S&P 500 stock ranker. Predict each stock's forward 21-trading-day
 return independently with XGBoost, sort to get a daily ranking, long the top
 decile, hold 21 trading days, rebalance monthly with a SPY/VIX regime gate.
-Backtested on test 2021→ vs SPY buy-and-hold; gated variant +18.8% CAGR
-(Sharpe 0.91) vs SPY +14.5% (Sharpe 0.85). Survivorship caveat applies.
+Backtested on test 2021→ vs SPY buy-and-hold; gated variant +17.7% CAGR
+(Sharpe 0.89) vs SPY +14.5% (Sharpe 0.85) on a point-in-time S&P 500
+universe. Residual survivorship caveat from yfinance coverage gaps applies.
 
 This is the ranking-style sibling of `technical-analysis-stock-scanner`, which
 filters and picks. Here we score and sort.
@@ -15,12 +16,12 @@ filters and picks. Here we score and sort.
 
 | Stage    | What it does                                                                                               |
 | -------- | ---------------------------------------------------------------------------------------------------------- |
-| Universe | Current S&P 500 from Wikipedia (v1)                                                                        |
+| Universe | Point-in-time S&P 500 (1996+ membership CSV) joined with current Wikipedia sectors                         |
 | Data     | yfinance OHLCV 2005-07-01 → today (1.5y buffer for 252d warmup), per-ticker parquet cache, plus SPY + ^VIX |
 | Features | 17 per-ticker + 8 market-context + 16 cross-sectional ranks + sector cat.                                  |
 | Label    | `close[t+21] / close[t] - 1`                                                                               |
 | Split    | Train 2007–2017, Val 2018–2020, Test 2021→. Chronological. No shuffling.                                   |
-| Model    | XGBoost regressor, RMSE loss, optuna-tuned on val decile spread (max_depth ≤ 5)                            |
+| Model    | XGBoost regressor, RMSE loss, optuna-tuned on val decile spread (max_depth fixed at 3)                     |
 | Backtest | Long-only top-50, monthly rebalance, regime gate (SPY > SMA200 AND VIX < 25), 21 shifted-start offsets     |
 | Costs    | 5 bps per side on rebalance turnover                                                                       |
 
@@ -43,6 +44,25 @@ Sectors come from a separate Wikipedia scrape (`load_sectors`) and only cover
 the **current** roster; tickers that have since left the index get
 `gics_sector = "Unknown"`, which XGBoost treats as a normal category.
 
+### Residual bias: yfinance doesn't retain delisted tickers
+
+The membership CSV lists every name ever in the index (917 since 2007), but
+yfinance only returns OHLCV for ~520 of them — the ~397 missing are mostly
+acquisitions and bankruptcies whose symbols got retired (AGN→ABBV, ATVI→MSFT,
+ANTM→ELV, AABA, EKDKQ, ABKFQ, …). After download + filter, the panel ends up
+with ~501 unique tickers, **all of which happen to be current S&P 500
+members** (zero `Unknown` sectors). The membership filter still correctly
+time-gates each ticker's rows (panel grows 396 names in 2005 → 501 in 2026),
+which fixes the cleanest case — names that were demoted but kept trading,
+e.g. PLTR before 2024-09. But the dramatic survivorship cleanup (Lehman,
+Enron, Kodak, Allergan) requires a data source that retains delisted-symbol
+prices: Sharadar, Norgate, Polygon historical, or CRSP via WRDS. yfinance
+free won't get you there.
+
+Net effect on results: gated CAGR moved 18.8% → 17.7%, raw 26.2% → 25.7% —
+small deflation, in the expected direction, but smaller than a true bias-free
+universe would deliver (probably another 3–5 CAGR points lower).
+
 ---
 
 ## Setup
@@ -58,9 +78,9 @@ Python 3.11+. All deps are pinned in `pyproject.toml`.
 ## Run order
 
 ```bash
-uv run python scripts/universe.py                   # cache S&P 500 ticker list
+uv run python scripts/universe.py                   # build membership history + sector cache
 uv run python scripts/data.py --tickers AAPL,MSFT   # 10s smoke test first
-uv run python scripts/data.py                       # full universe + SPY + VIX (~10–20 min first time)
+uv run python scripts/data.py                       # 917 historical tickers + SPY + VIX (~30–45 min first time; ~520 succeed via yfinance)
 
 uv run python scripts/features.py --ticker AAPL     # smoke-print one ticker's features
 uv run python scripts/features.py                   # build full panel → data/processed/features.parquet
@@ -337,12 +357,12 @@ mean equity curve plus the 10th/90th percentile band. Closely matches what
 21 overlapping sleeves would deliver, with much less code complexity.
 Sleeves are on the roadmap; this is the simpler-but-equivalent v1.
 
-### Results (test 2021-01-04 → 2026-03-26)
+### Results (test 2021-01-04 → 2026-03-26, point-in-time universe)
 
 | Variant                    | CAGR   | Vol   | Sharpe | Max DD | Final NAV | Time-in-market |
 | -------------------------- | ------ | ----- | ------ | ------ | --------- | -------------- |
-| **Raw long-only**          | +26.2% | 30.6% | +0.86  | -35.5% | 3.36×     | 100%           |
-| **Gated long-only**        | +18.8% | 20.6% | +0.91  | -27.4% | 2.45×     | 77%            |
+| **Raw long-only**          | +25.7% | 29.8% | +0.86  | -34.9% | 3.28×     | 100%           |
+| **Gated long-only**        | +17.7% | 19.9% | +0.89  | -26.8% | 2.34×     | 77%            |
 | SPY buy & hold (benchmark) | +14.5% | 17.0% | +0.85  | -24.5% | 2.05×     | —              |
 
 **Both variants beat SPY in absolute return.** Raw delivers higher CAGR
@@ -350,9 +370,9 @@ Sleeves are on the roadmap; this is the simpler-but-equivalent v1.
 a shallower drawdown.
 
 The gated variant is rebalance-date-sensitive (CAGR offset range ~+8% to
-+29% across the 21 starting days). That spread is structural to monthly
++28% across the 21 starting days). That spread is structural to monthly
 rebalance with a binary regime gate — sleeves would smooth it. The
-headline "+18.8%" is the mean across the 21 offsets.
+headline "+17.7%" is the mean across the 21 offsets.
 
 ### Null test (sanity check on the alpha)
 
@@ -381,10 +401,15 @@ Reading this:
 
 ### Caveats before believing the headline
 
-1. **Survivorship still inflates the absolute number.** The model-vs-random
-   gap (~13 CAGR points) should largely survive a point-in-time universe
-   (v2 TODO), but the absolute 26% CAGR almost certainly won't. Realistic
-   post-fix expectation: 15–20% CAGR raw, 12–15% gated.
+1. **Residual survivorship still inflates the absolute number.** Membership
+   timing is fixed (point-in-time CSV), but yfinance only retains data for
+   ~57% of the 917 tickers ever in the S&P 500 since 2007 — delisted /
+   acquired symbols are silently dropped. So the panel is closer to "current
+   members with proper time-gating" than a true bias-free universe. Real fix
+   needs paid data (Sharadar, Norgate, CRSP). Expect another 3–5 CAGR points
+   of deflation when that lands. The model-vs-random gap (~13 CAGR points)
+   should mostly survive — that comparison was already on the same biased
+   universe.
 2. **Concentrated picks.** Across 63 rebalance days the strategy lands on
    only 290 unique tickers, ~70% overlap between consecutive rebalances.
    MRNA is picked 87% of the time, PLTR 78%, TSLA 73% — high-beta
@@ -417,7 +442,10 @@ Reading this:
 
 ```
 data/
-  universe/sp500_members.csv     # cached ticker list + sector
+  universe/
+    SP_500_Historical_Component.csv  # raw membership change-events from fja05680/sp500
+    sp500_history.parquet            # parsed long-format (date, ticker)
+    sp500_sectors.csv                # current Wikipedia sector tags
   raw/{TICKER}.parquet           # OHLCV per ticker
   market/SPY.parquet, VIX.parquet
   processed/                     # features.parquet, panel.parquet (later)
@@ -461,22 +489,21 @@ scripts/
 Roadmap in rough priority order (highest leverage first). Each item has a
 self-contained payoff; you can pick them off one at a time.
 
-### 1. Point-in-time S&P 500 universe (kills survivorship bias)
+### 1. Paid price data for delisted tickers (closes the residual bias)
 
-**Biggest single thing left.** v1's `universe.py` returns today's S&P 500
-and applies that list backwards through the entire history — stocks that
-were in the index but later got delisted, acquired, or kicked out are
-silently absent. Backtests over-count winners.
+Membership-timing is now correct (`universe.py` does point-in-time filtering
+against the 1996+ change-event CSV), but yfinance only retains data for
+~57% of historical S&P 500 tickers — almost everything that left the index
+is missing. The panel ends up at ~501 unique tickers, all current members.
+Random-pick CAGR barely budged from the survivorship-biased run (12.9% →
+~12.5%) because we never had the dead names in the first place.
 
-The null test already showed random picks from this biased universe earn
-~13% CAGR (vs SPY's 14.5%); on a point-in-time universe that floor
-probably drops to 8–10%. The model-vs-random gap (~+13 CAGR points) should
-mostly survive the fix, but absolute backtest numbers will deflate.
-
-**What to build**: a monthly snapshot of S&P 500 add/remove events
-(scrapeable from Wikipedia's history page or a vendor feed). `universe.py`
-returns "members on date D"; `data.py` and `features.py` filter to the
-membership cohort active on each date.
+**What to build**: swap the data layer's source from yfinance to a feed
+that retains delisted symbols — Sharadar US Equities (~$50/mo), Norgate,
+Polygon historical, or CRSP via WRDS. `data.py` already keys per-ticker
+parquets, so the change is mostly the download function. Expect another
+3–5 CAGR points of deflation when this lands; the model-vs-random gap
+should mostly survive (it was already same-universe-vs-same-universe).
 
 ### 2. Sleeves upgrade (smooths the gated variant's offset CAGR range)
 
@@ -529,7 +556,8 @@ Candidates to try:
 
 ## TODOs
 
-- [ ] v2: point-in-time S&P 500 membership (kill survivorship bias) — biggest single thing left to fix
+- [x] v2: point-in-time S&P 500 membership filter (membership timing fixed)
+- [ ] paid price data for delisted tickers — yfinance retains only ~57% of historical S&P names; closes the residual ~3–5 CAGR points of survivorship bias
 - [x] features.py
 - [x] labels.py
 - [x] dataset.py + lookahead sanity assertion
