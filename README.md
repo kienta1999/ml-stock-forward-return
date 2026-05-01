@@ -404,19 +404,99 @@ scripts/
 
 ---
 
-## Metrics (defined for when evaluate.py lands)
+## Metrics glossary
 
 - **Information Coefficient (IC)** — daily Spearman correlation between
   predicted forward return and realised forward return, across all tickers
-  on that date. Reported as the time-series mean (and t-stat). >0.03 is
-  considered tradable; >0.05 is good.
+  on that date. Reported as the time-series mean (t-stat is a future
+  diagnostic). >0.03 is considered tradable; >0.05 is good.
 - **Top-decile spread** — mean realised forward return of top-decile picks
-  minus that of the bottom decile. Direct measure of monotonic ranking quality.
-- **Annualised return / vol / Sharpe** — daily portfolio log-returns
-  scaled by √252.
-- **Max drawdown** — peak-to-trough on the equity curve.
+  minus that of the bottom decile. Direct measure of monotonic ranking
+  quality. The objective `train.py` actually optimises.
+- **Annualised return / vol / Sharpe** — daily portfolio log-returns scaled
+  by √252. Computed by `backtest.py`.
+- **Max drawdown** — peak-to-trough on the equity curve. Computed by
+  `backtest.py`.
 - **Equity curve vs SPY** — visual sanity check; SPY = passive benchmark.
-- **Feature importance** — XGBoost gain importance per feature.
+  Plotted in `reports/backtest_equity.png`.
+- **Feature importance** — XGBoost gain importance per feature, written to
+  `reports/feature_importance.csv` after each training run.
+
+---
+
+## Next steps
+
+Roadmap in rough priority order (highest leverage first). Each item has a
+self-contained payoff; you can pick them off one at a time.
+
+### 1. Point-in-time S&P 500 universe (kills survivorship bias)
+
+**Biggest single thing left.** v1's `universe.py` returns today's S&P 500
+and applies that list backwards through the entire history — stocks that
+were in the index but later got delisted, acquired, or kicked out are
+silently absent. Backtests over-count winners.
+
+The null test already showed random picks from this biased universe earn
+~13% CAGR (vs SPY's 14.5%); on a point-in-time universe that floor
+probably drops to 8–10%. The model-vs-random gap (~+13 CAGR points) should
+mostly survive the fix, but absolute backtest numbers will deflate.
+
+**What to build**: a monthly snapshot of S&P 500 add/remove events
+(scrapeable from Wikipedia's history page or a vendor feed). `universe.py`
+returns "members on date D"; `data.py` and `features.py` filter to the
+membership cohort active on each date.
+
+### 2. Sleeves upgrade (smooths the gated variant's offset CAGR range)
+
+Today's gated backtest spans CAGR offset range [+8%, +29%] across the 21
+shifted starts — a 21-point gap between best- and worst-luck rebalance
+day. That's structural to monthly rebalance with a binary regime gate; no
+amount of tuning fixes it.
+
+**What to build**: 21 overlapping 21-day sleeves running in parallel,
+rebalancing 1/21 of book each day. Mathematically equivalent to averaging
+the 21 shifted-start offsets, but as one continuous portfolio rather than
+21 independent ones. Smooths daily turnover, eliminates rebalance-date
+fragility, becomes the realistic live-trading mechanic.
+
+### 3. Diagnostics module (per-month IC stability, drawdown, attribution)
+
+backtest.py reports summary stats; the interesting questions need slicing.
+
+**What to build** (probably `scripts/diagnostics.py`):
+- Per-month IC time series + t-stat + % of months positive — is the alpha
+  stable, or driven by 2 outlier months?
+- Underwater plot — when did drawdowns happen, how long did they last,
+  recovery time?
+- Picks-concentration audit — ticker frequency, sector breakdown,
+  consecutive-rebalance overlap distribution.
+- Per-stock attribution — top-10 contributors and detractors to total return.
+- Hit rate — of each rebalance's 50 picks, how many beat SPY over the next
+  21 days?
+
+### 4. Better features (the real lever for IC > 0.05)
+
+We've extracted what the current 41 features can give us (val IC ~0.03,
+val decile spread ~0.02). The next ~50 bps of IC won't come from
+hyperparameter tuning — it'll come from new signals.
+
+Candidates to try:
+- **Fundamentals**: trailing P/E, P/S, EV/EBITDA, FCF yield, ROIC. Quarterly
+  cadence so leakage discipline is harder; needs careful as-of dating.
+- **Earnings/event flags**: days-to-next-earnings, post-earnings drift window.
+- **Sector-relative momentum**: `excess_ret_21d` vs sector mean (not just
+  SPY).
+- **Options skew**: 25-delta put/call IV ratio per ticker — captures
+  fear/greed not visible in price alone.
+- **Short interest / borrow rate**: contrarian signal, especially for
+  high-vol names.
+
+### 5. `run_all.py` orchestrator
+
+Once the daily pipeline is stable, a single command that runs `data.py →
+features.py → labels.py → today.py --diff <yesterday>`. Handles errors
+gracefully, exits with the right status code for cron. Cheap to build but
+only worth doing after the upstream pieces are stable.
 
 ---
 
