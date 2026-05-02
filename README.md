@@ -4,19 +4,25 @@ ML-based S&P 500 stock ranker. Predict each stock's forward 21-trading-day
 return independently with XGBoost, sort to get a daily ranking, long the top
 decile, hold 21 trading days, rebalance monthly with a SPY/VIX regime gate.
 
-**Current status (depth-3, 200-trial sweep, label clip ±0.5):** raw
-long-only beats SPY by ~4.6 CAGR points apples-to-apples (+17.3% vs
-+12.7% through 2026-03-31, Sharpe +0.79 vs +0.75). The unlock was
-`colsample_bytree=0.628` — each tree is built with only 26 of 41 features,
-so many trees can't access SPY/VIX and are forced to find stock-specific
-signal. Val decile spread jumped +0.0213 → +0.0297 (+40%) over the
-previous 50-trial fixed-depth run. The gated variant still underperforms
-SPY (+9.7%), confirming the model still partially benefits from
-market-direction information — see
+**Current status (depth-3, 200-trial sweep, label clip ±0.5,
+point-in-time S&P 500 universe):** raw long-only beats SPY by ~4.6 CAGR
+points apples-to-apples (+17.3% vs +12.7% through 2026-03-31, Sharpe
++0.79 vs +0.75). The unlock was `colsample_bytree=0.628` — each tree is
+built with only 26 of 41 features, so many trees can't access SPY/VIX
+and are forced to find stock-specific signal. Val decile spread jumped
++0.0213 → +0.0297 (+40%) over the previous 50-trial fixed-depth run.
+The gated variant still underperforms SPY (+9.7%), confirming the model
+still partially benefits from market-direction information — see
 [Diagnosis](#diagnosis-half-fixed-cross-sectional-signal-up-but-still-partially-regime-driven).
-Earlier runs without label clipping reported headline CAGRs of +25.7%
-raw / +17.7% gated but those were driven by a single deep tree fit to
-extreme delisted-ticker labels — see lessons-learned below.
+
+**Note on prior CAGR figures floating around:** older iterations of this
+project reported headline CAGRs as high as +26.2% raw. Those numbers
+came from a *current-S&P-500-only* universe (no point-in-time filter,
+maximum survivorship bias). The current run uses point-in-time historical
+membership, which already deflates CAGR by ~0.5 points; a true bias-free
+universe (with delisted-ticker prices, see [Next steps §3](#3-paid-price-data-for-delisted-tickers-run-before-going-live))
+would deflate further. See [Result evolution](#result-evolution-which-runs-produced-which-numbers)
+below for the full lineage.
 
 This is the ranking-style sibling of `technical-analysis-stock-scanner`, which
 filters and picks. Here we score and sort.
@@ -417,6 +423,39 @@ The gated variant is rebalance-date-sensitive (CAGR offset range +0.83%
 to +15.18% across the 21 starting days) — a 14-point gap structural to
 monthly rebalance with a binary regime gate. Sleeves would smooth it.
 
+### Result evolution: which runs produced which numbers
+
+Numbers from this project have moved meaningfully across iterations
+because three different things changed: the **universe** (current-only
+→ point-in-time historical), the **labels** (no clip → ±0.5 clip), and
+the **tuning budget** (20 → 50 → 200 trials with widened search space).
+Comparing across runs is only meaningful when you know which combination
+produced which number.
+
+| Run                                      | Universe                | Label          | Tuning                       | Raw CAGR | Gated CAGR | Notes                                                                                                            |
+| ---------------------------------------- | ----------------------- | -------------- | ---------------------------- | -------- | ---------- | ---------------------------------------------------------------------------------------------------------------- |
+| Pre-historical-filter (~2026-04)         | **Current S&P 500 only** | none           | IC objective, 20 trials      | +26.2%   | +18.8%     | Maximum survivorship bias. The headline +26.2% in old null-test tables. Don't compare to anything below.         |
+| Post-historical-filter, pre-clip         | Point-in-time           | none           | decile-spread, 20 trials     | +25.7%   | +17.7%     | Universe deflation only ~0.5 pts because yfinance still misses delisted names. `best_iteration=196`.             |
+| Post-clip, 50-trial fixed-depth          | Point-in-time           | clip ±0.5      | decile-spread, 50 trials, depth=3 fixed | +13.3% | +8.6%  | Label clip fixed MSE blow-up but optuna landed in a too-shallow basin (`best_iteration=19`); regime-dominated.   |
+| **Current** (post-clip, 200-trial sweep) | Point-in-time           | clip ±0.5      | decile-spread, 200 trials, depth ∈ [3,6] | **+17.3%** | **+9.7%** | `colsample_bytree=0.629` unlocked cross-sectional signal. Apples-to-apples with SPY +12.7%. **This is current.** |
+
+Three things to take away:
+
+- The **+26.2%** number you'll find in old screenshots / null-test
+  tables is on the *current-only* universe. It's not comparable to the
+  current +17.3%; it's roughly +0.5 pts of universe-survivorship-bias
+  + multiple points of single-deep-tree-overfit on its top.
+- The point-in-time filter (current → historical) only deflates by
+  ~0.5 CAGR pts because yfinance retains data for only ~57% of names
+  ever in the S&P 500 — the panel ends up at ~501 unique tickers,
+  almost entirely current members. A truly bias-free universe (paid
+  data with delisted-ticker prices) would deflate further, probably
+  another 3–5 pts.
+- The +13.3% → +17.3% jump in the last row is **pure tuning** (same
+  data, same labels, wider hyperparameter search). The model has real
+  cross-sectional signal; the prior 50-trial run just hadn't found
+  the right basin.
+
 ### Diagnosis: half-fixed — cross-sectional signal up, but still partially regime-driven
 
 The previous section's diagnosis was that the depth-3 / 50-trial model
@@ -447,23 +486,26 @@ train on date-demeaned labels) and adding genuinely orthogonal
 stock-specific signals (fundamentals, earnings, options skew). All
 queued in [Next steps](#next-steps).
 
-### Null test (sanity check on the alpha) — stale, pre-clip
+### Null test (sanity check on the alpha) — stale, current-S&P-500 universe + pre-clip
 
-The numbers below are from the earlier run before the label clip + depth-3
-fix and are kept for reference. They need to be re-run on the current model
-before they can be trusted; expect the model-vs-random gap to compress
-significantly given the diagnosis above.
+The numbers below are from the **earliest run on the current-S&P-500-only
+universe** (no point-in-time filter, no label clip). They're kept for
+reference but should not be compared to the current +17.3% raw — that's
+on a different (point-in-time, post-clip, 200-trial) configuration. See
+[Result evolution](#result-evolution-which-runs-produced-which-numbers)
+above. Re-running on the current configuration is queued as a TODO; expect
+the model-vs-random gap to compress.
 
 | Predictions used                | CAGR   | Sharpe | Final NAV |
 | ------------------------------- | ------ | ------ | --------- |
-| The model (pre-clip run)        | +26.2% | +0.86  | 3.36×     |
+| The model (current-only, pre-clip) | +26.2% | +0.86  | 3.36×     |
 | Random (Gaussian noise)         | +12.9% | +0.78  | 1.88×     |
 | Just `dist_52w_high` (1 factor) | +10.6% | +0.74  | 1.69×     |
 | SPY buy & hold (old end-date)   | +14.5% | +0.85  | 2.05×     |
 
-Reading this (pre-clip context):
+Reading this (current-only universe, pre-clip context):
 
-- **Random ≈ SPY**: equal-weighted random picks from our (current-S&P-500)
+- **Random ≈ SPY**: equal-weighted random picks from a current-S&P-500
   universe earn ~13% — the survivorship-bias floor. SPY's cap-weighting on
   Mag 7 buys it a couple extra points.
 - **Naive momentum < SPY**: just chasing 52-week highs alone underperformed
