@@ -188,7 +188,7 @@ def _objective(
     risk). See README v1 results.
     """
     params = {
-        "max_depth": 3,
+        "max_depth": trial.suggest_int("max_depth", 3, 6),
         "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
         "n_estimators": trial.suggest_int("n_estimators", 200, 1000),
         "min_child_weight": trial.suggest_int("min_child_weight", 1, 20),
@@ -342,11 +342,11 @@ def main() -> None:
         best_params = dict(DEFAULT_PARAMS)
         study = None
     else:
-        print(f"\nRunning optuna ({args.trials} trials, maximize val IC)...")
+        print(f"\nRunning optuna ({args.trials} trials, maximize val decile spread)...")
         best_params, study = tune(
             X_train, y_train, X_val, y_val, dates_val, args.trials
         )
-        print(f"\nBest val IC during tuning: {study.best_value:+.4f}")
+        print(f"\nBest val decile spread during tuning: {study.best_value:+.4f}")
         print("Best params:")
         for k, v in best_params.items():
             print(f"  {k}: {v}")

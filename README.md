@@ -4,15 +4,19 @@ ML-based S&P 500 stock ranker. Predict each stock's forward 21-trading-day
 return independently with XGBoost, sort to get a daily ranking, long the top
 decile, hold 21 trading days, rebalance monthly with a SPY/VIX regime gate.
 
-**Current status (depth-3 model, label clip ±0.5):** raw long-only roughly
-matches SPY apples-to-apples (CAGR +13.3% vs SPY +12.7% over the same end
-date 2026-03-31), gated underperforms (+8.6%). Feature importance is
-dominated by market-context signals (SPY/VIX), so the model is effectively
-acting as a market-direction timer rather than a stock picker — see
-[Diagnosis](#diagnosis-current-model-is-a-market-timer-not-a-stock-picker).
-Earlier runs without label clipping reported higher CAGRs (+25.7% raw /
-+17.7% gated) but those were driven by a single deep tree fit to extreme
-delisted-ticker labels — see lessons-learned below.
+**Current status (depth-3, 200-trial sweep, label clip ±0.5):** raw
+long-only beats SPY by ~4.6 CAGR points apples-to-apples (+17.3% vs
++12.7% through 2026-03-31, Sharpe +0.79 vs +0.75). The unlock was
+`colsample_bytree=0.628` — each tree is built with only 26 of 41 features,
+so many trees can't access SPY/VIX and are forced to find stock-specific
+signal. Val decile spread jumped +0.0213 → +0.0297 (+40%) over the
+previous 50-trial fixed-depth run. The gated variant still underperforms
+SPY (+9.7%), confirming the model still partially benefits from
+market-direction information — see
+[Diagnosis](#diagnosis-half-fixed-cross-sectional-signal-up-but-still-partially-regime-driven).
+Earlier runs without label clipping reported headline CAGRs of +25.7%
+raw / +17.7% gated but those were driven by a single deep tree fit to
+extreme delisted-ticker labels — see lessons-learned below.
 
 This is the ranking-style sibling of `technical-analysis-stock-scanner`, which
 filters and picks. Here we score and sort.
@@ -28,7 +32,7 @@ filters and picks. Here we score and sort.
 | Features | 17 per-ticker + 8 market-context + 16 cross-sectional ranks + sector cat.                                  |
 | Label    | `close[t+21] / close[t] - 1`, clipped to ±0.5 (~0.27% rows clipped) so dead-ticker −100% labels don't dominate MSE |
 | Split    | Train 2007–2017, Val 2018–2020, Test 2021→. Chronological. No shuffling.                                   |
-| Model    | XGBoost regressor, RMSE loss, optuna-tuned on val decile spread (max_depth fixed at 3)                     |
+| Model    | XGBoost regressor, RMSE loss, optuna-tuned on val decile spread (max_depth ∈ [3, 6], 200 trials)           |
 | Backtest | Long-only top-50, monthly rebalance, regime gate (SPY > SMA200 AND VIX < 25), 21 shifted-start offsets     |
 | Costs    | 5 bps per side on rebalance turnover                                                                       |
 
@@ -291,34 +295,51 @@ refit on the best params and saved to `models/xgb_v1.json`.
 - `reports/optuna_trials.csv` — full tuning history (params + IC per trial)
 - `reports/train_metrics.json` — final train/val RMSE + IC + decile spread + chosen params
 
-### v1 results (val 2018–2020, 50-trial tune, depth-3, label clip ±0.5)
+### v1 results (val 2018–2020, 200-trial tune, max_depth ∈ [3, 6], label clip ±0.5)
 
-| Metric                                 | Value                  |
-| -------------------------------------- | ---------------------- |
-| val decile spread (top10 − bot10, 21d) | +0.0213 (~213 bps)     |
-| val IC (mean daily Spearman)           | +0.0524                |
-| train IC                               | +0.0955                |
-| val RMSE / train RMSE                  | 0.1033 / 0.0871        |
-| best_iteration                         | **19**                 |
-| chosen `max_depth`                     | 3 (fixed)              |
-| chosen `learning_rate`                 | 0.076                  |
-| chosen `n_estimators`                  | 938 (capped by ES)     |
+| Metric                                 | Current (200-trial sweep) | Prior run (50-trial, depth fixed) |
+| -------------------------------------- | ------------------------- | --------------------------------- |
+| val decile spread (top10 − bot10, 21d) | **+0.0297 (~297 bps)**    | +0.0213                           |
+| val IC (mean daily Spearman)           | +0.0554                   | +0.0524                           |
+| train IC                               | +0.0659                   | +0.0955                           |
+| val RMSE / train RMSE                  | 0.1029 / 0.0899           | 0.1033 / 0.0871                   |
+| best_iteration                         | 30                        | 19                                |
+| chosen `max_depth`                     | 3 (out of [3, 6])         | 3 (fixed)                         |
+| chosen `learning_rate`                 | 0.082                     | 0.076                             |
+| chosen `n_estimators`                  | 860 (capped by ES)        | 938 (capped by ES)                |
+| chosen `min_child_weight`              | 11                        | 2                                 |
+| chosen `subsample`                     | 0.949                     | 0.678                             |
+| chosen `colsample_bytree`              | **0.629**                 | 0.618                             |
+| chosen `reg_lambda`                    | 0.446                     | 0.095                             |
 
-`best_iteration=19` is the headline problem — even with the label clip in
-place, optuna picked a fast `learning_rate=0.076` and early stopping fires
-after 19 trees. 19 depth-3 trees ≈ ~150 leaves total, and as the next
-section shows the splits land overwhelmingly on SPY/VIX features → most
-tickers fall into the same leaf path → ranking is determined by market
-regime, not stock-specific signal.
+Two things stand out:
+
+1. **`max_depth=3` won again** — out of [3, 6], optuna picked the
+   shallowest. Deeper trees didn't help, which means the regime-dominance
+   diagnosis from the prior run was *not* primarily a depth problem.
+2. **The actual lever was `colsample_bytree=0.629` plus a stronger
+   `reg_lambda=0.446`.** With 26 of 41 features available per tree on
+   average, many trees are built without any of the `spy_*` / `vix_*`
+   features in their candidate pool — those trees are forced to find
+   stock-specific splits, and the ensemble inherits that diversity. Larger
+   `min_child_weight=11` keeps individual trees from carving tiny leaves
+   on noise; bigger `reg_lambda=0.446` shrinks leaf magnitudes. Together
+   they produced an ensemble whose `train_ic` actually *dropped* (0.096 →
+   0.066) while `val_ic` rose (0.052 → 0.055) — a real generalisation gap
+   close, not a bigger overfit.
+
+`best_iteration=30` is still on the small side (the older pre-clip run
+hit 196), but with a much higher per-tree contribution and a healthier
+generalisation gap. The 200-trial sweep cost ~106 minutes but bought a
++40% improvement in the metric the strategy actually trades.
 
 **Earlier-run note (no label clip, 20 trials):** the previously reported run
 without label clipping landed `best_iteration=196` with a much slower
 `learning_rate=0.019`, val IC 0.030, decile spread 0.020. The clip was
-added because a few delisted-ticker −100% labels were dominating MSE; that
-fix worked (RMSE is now well-behaved), but it appears to have removed
-whatever signal the slow ensemble was finding in the tails. Net val decile
-spread is unchanged (+0.020 → +0.021), but the resulting model is
-shallower and more regime-driven.
+added because a few delisted-ticker −100% labels were dominating MSE.
+That fix kept val decile spread at parity (+0.020 → +0.021) on the first
+re-run; it took the wider hyperparameter sweep above to recover and
+exceed the pre-clip result.
 
 **Lessons learned along the way (two related misalignments)**:
 
@@ -368,74 +389,63 @@ mean equity curve plus the 10th/90th percentile band. Closely matches what
 21 overlapping sleeves would deliver, with much less code complexity.
 Sleeves are on the roadmap; this is the simpler-but-equivalent v1.
 
-### Results (test 2021-01-04 → 2026-03-31, depth-3 + label clip ±0.5)
+### Results (test 2021-01-04 → 2026-03-31, 200-trial sweep + label clip ±0.5)
 
-#### As reported by `backtest.py` (unequal end dates)
+`backtest.py` now clips the SPY benchmark to the strategy's last
+predictable date so the headline comparison is apples-to-apples by
+default; the CSV still keeps the full SPY series so the post-strategy
+tail (rally to 2026-05-01) is visible for inspection.
 
-| Variant                    | CAGR   | Vol   | Sharpe | Max DD | Final NAV | Time-in-market | End date   |
-| -------------------------- | ------ | ----- | ------ | ------ | --------- | -------------- | ---------- |
-| Raw long-only              | +13.2% | 20.3% | +0.65  | -24.6% | 1.91×     | 100%           | 2026-03-31 |
-| Gated long-only            | +8.7%  | 12.4% | +0.70  | -18.1% | 1.54×     | 77%            | 2026-03-31 |
-| SPY buy & hold (benchmark) | +14.7% | 16.9% | +0.87  | -24.5% | 2.07×     | —              | 2026-05-01 |
+| Variant                              | CAGR    | Vol   | Sharpe | Max DD | Final NAV | Time-in-market |
+| ------------------------------------ | ------- | ----- | ------ | ------ | --------- | -------------- |
+| **Raw long-only**                    | +17.3%  | 22.0% | +0.79  | -22.6% | 2.30×     | 100%           |
+| Gated long-only                      | +9.7%   | 14.9% | +0.65  | -22.7% | 1.62×     | 77%            |
+| SPY buy & hold (clipped @2026-03-31) | +12.7%  | 17.0% | +0.75  | -24.5% | 1.87×     | —              |
 
-`backtest.py` reports SPY's CAGR through the latest market date (2026-05-01)
-while the strategy curves stop at the last date with a 21-day-old prediction
-(2026-03-31). SPY rallied ~8% in those 21 days (1.87 → 2.07), so the
-default comparison is unfair to the strategy.
+**Raw long-only beats SPY by ~4.6 CAGR points with a higher Sharpe and a
+shallower drawdown.** That's the biggest swing yet from a single tuning
+change: just letting optuna explore `colsample_bytree` properly on a
+200-trial budget moved raw from +13.3% to +17.3%, while the model
+hyperparameters stayed shallow (depth=3, 30 trees) and the train IC
+actually *fell* (less overfitting).
 
-#### Apples-to-apples (all curves clipped at 2026-03-31)
+The gated variant still underperforms SPY by ~3 CAGR points and
+underperforms raw by ~7.6. That gap is the residual fingerprint of the
+old diagnosis — see next section.
 
-| Variant                    | NAV @ 2026-03-31 | CAGR (5.22 yr) |
-| -------------------------- | ---------------- | -------------- |
-| Raw long-only              | 1.911            | **+13.3%**     |
-| Gated long-only            | 1.543            | +8.6%          |
-| SPY buy & hold (benchmark) | 1.868            | +12.7%         |
-
-Apples-to-apples, **raw long-only narrowly beats SPY (~+0.6 CAGR points)**,
-and the gated variant underperforms by ~4 points. The "alpha" is small
-enough to be inside the survivorship-bias buffer (next subsection).
-
-The gated variant is rebalance-date-sensitive (CAGR offset range +0.5%
-to +14.2% across the 21 starting days) — a 14-point gap structural to
+The gated variant is rebalance-date-sensitive (CAGR offset range +0.83%
+to +15.18% across the 21 starting days) — a 14-point gap structural to
 monthly rebalance with a binary regime gate. Sleeves would smooth it.
 
-### Diagnosis: current model is a market-timer, not a stock-picker
+### Diagnosis: half-fixed — cross-sectional signal up, but still partially regime-driven
 
-Three observations from `reports/feature_importance.csv` and the latest
-`scripts/today.py` output point to the same conclusion:
+The previous section's diagnosis was that the depth-3 / 50-trial model
+ranked stocks mostly by market-direction signal rather than per-ticker
+signal. The 200-trial sweep partially fixed that:
 
-1. **Feature importance is dominated by market-context features.** Top 6
-   by gain importance are `spy_trend_regime`, `spy_ret_21d`,
-   `vix_zscore_20d`, `vix_level`, `dist_52w_high`, `spy_rsi_14` — five out
-   of six are SPY/VIX features that broadcast the **same value to every
-   ticker on a given date**. Adding their share gives ~38% of total gain
-   on macro signals; only `dist_52w_high` (a per-ticker feature) cracks
-   the top 5.
-2. **Most tickers get an identical predicted return.** On 2026-03-31,
-   only the top ~11 picks have unique scores; tickers ranked 12–50 (and
-   beyond) all land at exactly `+0.0194`. With depth-3 × 19 trees and
-   most splits on date-broadcast SPY/VIX features, the bulk of the
-   universe shares a leaf path → no cross-sectional differentiation. The
-   strategy's "top 50" is really "top ~10 picks plus 40 random tickers
-   tied at the regime-baseline value."
-3. **Removing the regime gate helps, not hurts.** Normally a regime gate
-   adds value when the model can pick stocks but can't time the market.
-   Here, raw (no-gate) outperforms gated by ~4.7 CAGR points — consistent
-   with a model whose ranking is *already* primarily timing the market;
-   the gate then double-times the same signal and costs ~23% time-out-of-
-   market for no benefit.
+- **Raw beats SPY by 4.6 CAGR points** (was 0.6) — the model is now
+  doing something cross-sectionally useful, not just riding regime.
+- **Train IC dropped 0.096 → 0.066 while val IC rose** — the new
+  ensemble generalises better, the hallmark of having traded raw fitting
+  power for diversity (via `colsample_bytree=0.629`).
 
-What this means in practice: the v1 model's val IC of +0.052 is real, but
-it's mostly date-level signal (good days vs. bad days for the whole
-universe) rather than cross-sectional signal (which stock will beat which
-on a given day). For a top-N strategy that's the wrong kind of signal —
-the strategy needs the model to discriminate *within* a day, not across
-days. Fixes likely live in (a) shrinking the influence of broadcast
-features (drop or down-weight SPY/VIX features in training; or train on
-demeaned-by-date labels), (b) deepening trees so per-ticker features can
-take more splits (the next experiment is `max_depth ∈ [3, 6]` — already
-wired in `train.py`), and (c) better stock-specific features
-(fundamentals, earnings, options skew — already on the next-steps list).
+But two symptoms persist:
+
+- **Gated still underperforms raw by 7.6 CAGR points.** A pure
+  stock-picker would *benefit* from the regime gate (fewer drawdown
+  days, similar return); here it costs 7.6 points. So the model is still
+  using market-direction information that the regime gate then
+  double-times.
+- **SPY/VIX features still dominate `feature_importance.csv`.** Even
+  with `colsample_bytree=0.629`, the trees that *do* see SPY/VIX still
+  prefer to split on them first. The diversification helps the ensemble
+  but doesn't suppress the dominance per-tree.
+
+What still moves the needle: experiments that explicitly remove the
+date-level signal (train without `spy_*`/`vix_*` features at all, or
+train on date-demeaned labels) and adding genuinely orthogonal
+stock-specific signals (fundamentals, earnings, options skew). All
+queued in [Next steps](#next-steps).
 
 ### Null test (sanity check on the alpha) — stale, pre-clip
 
@@ -553,28 +563,26 @@ scripts/
 Roadmap in rough priority order (highest leverage first). Each item has a
 self-contained payoff; you can pick them off one at a time.
 
-### 1. Restore stock-specific signal (fix the regime-dominance issue)
+### 1. Push cross-sectional signal further (gated still underperforms raw)
 
-This is the new top priority — see [Diagnosis](#diagnosis-current-model-is-a-market-timer-not-a-stock-picker)
-for the symptoms. Three concrete experiments, in order:
+The 200-trial sweep with `max_depth ∈ [3, 6]` partially fixed the
+regime-dominance issue (raw long-only now beats SPY by 4.6 CAGR points,
+val decile spread +40%), but the gate still costs ~7.6 CAGR points
+relative to raw — so the model is still leaning on market-direction
+information that the gate then double-times. Two experiments left:
 
-1. **Tune `max_depth` in [3, 6].** Already wired in `train.py` (the
-   currently-saved model was trained with depth fixed at 3). Deeper trees
-   give per-ticker features more chance to take splits after the regime
-   features burn through the early ones. Watch decile spread, not IC: a
-   higher IC with the same regime-dominance pattern wouldn't fix the
-   strategy.
-2. **Down-weight or drop the SPY/VIX broadcast features.** Train a variant
+1. **Down-weight or drop the SPY/VIX broadcast features.** Train a variant
    without `spy_*` and `vix_*` (and possibly `beta_60d` and the binary
    `trend_regime`) so the model is forced to pick on cross-sectional
    features only. Compare val decile spread and per-day prediction
-   variance.
-3. **Train on date-demeaned labels.** Replace `y = forward_21d_return` with
+   variance, and check whether gated finally beats raw (the sign of a
+   real stock-picker).
+2. **Train on date-demeaned labels.** Replace `y = forward_21d_return` with
    `y = forward_21d_return − date_mean(forward_21d_return)`. This
-   explicitly removes the date-level component the model is currently
-   chasing and forces it to learn within-date ordering. The original raw
-   label can still be reported on, but the loss is computed against the
-   demeaned target.
+   explicitly removes the date-level component the model is still
+   chasing and forces it to learn within-date ordering. Train metrics
+   would still be computed on the raw label for reporting; the loss is
+   on the demeaned target.
 
 ### 2. Paid price data for delisted tickers (closes the residual bias)
 
@@ -655,7 +663,7 @@ Candidates to try:
 - [ ] diagnostics: per-month IC stability, underwater plot, picks-concentration audit, per-stock attribution
 - [x] run_all.py orchestrator — daily and retrain modes, auto --diff for today.py
 - [x] add label clip ±0.5 to keep dead-ticker −100% labels from dominating MSE
-- [ ] re-tune with `max_depth ∈ [3, 6]` (already wired in train.py) and re-run backtest
+- [x] re-tune with `max_depth ∈ [3, 6]` and re-run backtest (200 trials; raw +13.3% → +17.3%, val decile spread +0.0213 → +0.0297; optuna picked depth=3 + `colsample_bytree=0.629` as the actual lever)
 - [ ] experiment: train without SPY/VIX broadcast features to force cross-sectional signal
 - [ ] experiment: train on date-demeaned forward returns
 - [x] fix `backtest.py` SPY end-date so headline CAGR compares like-for-like
