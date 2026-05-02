@@ -563,6 +563,13 @@ scripts/
 Roadmap in rough priority order (highest leverage first). Each item has a
 self-contained payoff; you can pick them off one at a time.
 
+> **Next session focus:** start with §1's date-demeaned-labels experiment
+> (free, ~2 hrs), then §2 step 1 (`excess_ret_21d_vs_sector`, ~1 hr) and
+> step 2 (earnings-date flag from EDGAR, ~½ day). All three are free and
+> targeted at the gated-still-underperforms-raw symptom. Save §3 (paid
+> data) until the model has graduated to a real stock-picker; do it
+> regardless before going live.
+
 ### 1. Push cross-sectional signal further (gated still underperforms raw)
 
 The 200-trial sweep with `max_depth ∈ [3, 6]` partially fixed the
@@ -584,23 +591,76 @@ information that the gate then double-times. Two experiments left:
    would still be computed on the raw label for reporting; the loss is
    on the demeaned target.
 
-### 2. Paid price data for delisted tickers (closes the residual bias)
+### 2. Better features (the real lever for IC > 0.07)
 
-Membership-timing is now correct (`universe.py` does point-in-time filtering
-against the 1996+ change-event CSV), but yfinance only retains data for
-~57% of historical S&P 500 tickers — almost everything that left the index
-is missing. The panel ends up at ~501 unique tickers, all current members.
-Random-pick CAGR barely budged from the survivorship-biased run (12.9% →
-~12.5%) because we never had the dead names in the first place.
+The current 41 features are technical + market-context only — no
+fundamentals, no events, no options. That's the obvious gap, and the
+~next 100 bps of val IC almost certainly come from new signals, not from
+re-running optuna. Free sources beat re-tuning by a wide margin here.
 
-**What to build**: swap the data layer's source from yfinance to a feed
-that retains delisted symbols — Sharadar US Equities (~$50/mo), Norgate,
-Polygon historical, or CRSP via WRDS. `data.py` already keys per-ticker
-parquets, so the change is mostly the download function. Expect another
-3–5 CAGR points of deflation when this lands; the model-vs-random gap
-should mostly survive (it was already same-universe-vs-same-universe).
+**Concrete sequence (each free, ordered by cost-to-build):**
 
-### 3. Sleeves upgrade (smooths the gated variant's offset CAGR range)
+1. **`excess_ret_21d_vs_sector`** (~10 lines, ~1 hour). You already have
+   sector tags; subtract the sector mean instead of (or in addition to)
+   SPY mean. Sector-relative momentum is one of the strongest known
+   cross-sectional factors. Do this first.
+2. **Earnings dates / days-to-next-earnings flag** (~half day). Pull from
+   SEC EDGAR 8-K filings (free). Add `days_to_earnings` (signed) plus a
+   `post_earnings_drift_window` boolean. PEAD is a real, persistent
+   factor.
+3. **Fundamentals from SEC EDGAR XBRL** (~1 week, parser-heavy). Free,
+   point-in-time-correct quarterly data with proper as-of dating. Start
+   with 4–5 ratios: trailing P/E, P/S, FCF yield, ROIC, debt/equity.
+   The XBRL parser is the hard part; once it exists, adding ratios is
+   trivial. SimFin and FMP have free tiers if you want a less painful
+   first pass before doing it properly.
+4. **Short interest** (FINRA bi-monthly, free). Contrarian signal,
+   especially for high-vol names.
+5. **Insider transactions** (SEC EDGAR Form 4, free). Quarterly cadence;
+   leakage discipline matters.
+
+After (1)–(3), re-run train + backtest and check whether (a) val IC
+moves into the 0.07+ range, and (b) gated finally beats raw. If yes,
+the model has graduated from regime-timer to real stock-picker. If not,
+you've hit a data-quality ceiling and §3 (paid data) becomes the next
+move.
+
+**Skip until later:** options skew/IV (paid; ORATS ~$300/mo, CBOE
+DataShop $$$$), news sentiment (RavenPack $$$$, NLP is high-effort),
+analyst revisions (IBES via WRDS only). Cost-to-signal is bad until the
+free-feature stack is exhausted.
+
+### 3. Paid price data for delisted tickers (run before going live)
+
+This *deflates the backtest*, it doesn't improve the model. Membership-
+timing is correct (`universe.py` does point-in-time filtering against
+the 1996+ change-event CSV), but yfinance only retains data for ~57% of
+historical S&P 500 tickers — almost everything that left the index is
+missing. The panel ends up at ~501 unique tickers, all current members.
+Random-pick CAGR barely budged from the survivorship-biased run (12.9%
+→ ~12.5%) because we never had the dead names in the first place.
+
+Expect another 3–5 CAGR points of deflation when this lands. The
+model-vs-SPY gap (currently ~4.6 CAGR points raw) probably mostly
+survives — that's a same-universe comparison — but the *absolute*
+numbers should be trusted only after this swap. **Do this before
+trading real money.**
+
+**Options (ordered by indie-quant fit):**
+
+| Source | Cost | Notes |
+| ---- | ---- | ---- |
+| **Sharadar US Equities** (Nasdaq Data Link) | ~$50/mo | Indie-quant default. Delistings + fundamentals + sectors in one feed → kills two birds (data §2 step 3). Recommended. |
+| Norgate Premium Data | ~$60/mo + tools | Built for backtesting; total-return adjusted; point-in-time index membership baked in. |
+| EOD Historical Data | ~$20/mo | Cheapest with delistings, mixed coverage reviews. |
+| Polygon.io (Stocks Advanced) | $199/mo | Real-time + history + delistings. Overkill unless you also want intraday. |
+| CRSP via WRDS | $$$$ | Gold standard, academic-only access. Skip. |
+| yfinance + manual delisted backfill | Free | Hacky: scrape delisted prices from Stooq or another free source and merge. $0 but fragile. |
+
+`data.py` already keys per-ticker parquets, so the change is mostly the
+download function — should be a 1–2 day swap once the feed is chosen.
+
+### 4. Sleeves upgrade (smooths the gated variant's offset CAGR range)
 
 Today's gated backtest spans CAGR offset range [+0.5%, +14.2%] across the
 21 shifted starts — a 14-point gap between best- and worst-luck rebalance
@@ -613,7 +673,7 @@ the 21 shifted-start offsets, but as one continuous portfolio rather than
 21 independent ones. Smooths daily turnover, eliminates rebalance-date
 fragility, becomes the realistic live-trading mechanic.
 
-### 4. Diagnostics module (per-month IC stability, drawdown, attribution)
+### 5. Diagnostics module (per-month IC stability, drawdown, attribution)
 
 backtest.py reports summary stats; the interesting questions need slicing.
 
@@ -628,24 +688,6 @@ backtest.py reports summary stats; the interesting questions need slicing.
 - Per-stock attribution — top-10 contributors and detractors to total return.
 - Hit rate — of each rebalance's 50 picks, how many beat SPY over the next
   21 days?
-
-### 5. Better features (the real lever for IC > 0.05)
-
-We've extracted what the current 41 features can give us (val IC ~0.03,
-val decile spread ~0.02). The next ~50 bps of IC won't come from
-hyperparameter tuning — it'll come from new signals.
-
-Candidates to try:
-
-- **Fundamentals**: trailing P/E, P/S, EV/EBITDA, FCF yield, ROIC. Quarterly
-  cadence so leakage discipline is harder; needs careful as-of dating.
-- **Earnings/event flags**: days-to-next-earnings, post-earnings drift window.
-- **Sector-relative momentum**: `excess_ret_21d` vs sector mean (not just
-  SPY).
-- **Options skew**: 25-delta put/call IV ratio per ticker — captures
-  fear/greed not visible in price alone.
-- **Short interest / borrow rate**: contrarian signal, especially for
-  high-vol names.
 
 ---
 
@@ -668,6 +710,12 @@ Candidates to try:
 - [ ] experiment: train on date-demeaned forward returns
 - [x] fix `backtest.py` SPY end-date so headline CAGR compares like-for-like
 - [ ] re-run null test on the post-clip model (current numbers are stale)
+- [ ] feature: `excess_ret_21d_vs_sector` (sector-relative momentum — ~10 lines, free, easy first win)
+- [ ] feature: earnings-date flag from SEC EDGAR 8-K (days-to-next-earnings, post-earnings drift window — free)
+- [ ] feature: SEC EDGAR XBRL fundamentals parser (P/E, P/S, FCF yield, ROIC, debt/equity — free, ~1 week)
+- [ ] feature: short interest from FINRA bi-monthly (free)
+- [ ] feature: insider transactions from SEC EDGAR Form 4 (free)
+- [ ] data: swap yfinance → Sharadar (or equivalent) for delisted-ticker coverage — do before going live
 
 Paste this to claude to ask
 claude --resume b63b90f4-923f-419f-b30e-00cd9006952f
