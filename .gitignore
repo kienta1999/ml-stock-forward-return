@@ -11,6 +11,6 @@ data/universe/
 
 
 # Trained artifacts
-models/*.json
+# models/*.json
 reports/*.png
 reports/*.json
