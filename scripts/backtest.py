@@ -321,7 +321,15 @@ def main() -> None:
     )
 
     test_start = pd.Timestamp(test_panel["date"].min())
-    spy_eq = spy_buy_and_hold(market, test_start)
+    spy_eq_full = spy_buy_and_hold(market, test_start)
+
+    # Apples-to-apples: strategy curves stop at the last date with a 21-day-
+    # old prediction; clip SPY to the same end date so reported CAGRs compare
+    # like-for-like. spy_eq_full is kept for the post-strategy tail in the CSV.
+    strategy_end = raw_curves.index.max()
+    if gated_curves is not None:
+        strategy_end = max(strategy_end, gated_curves.index.max())
+    spy_eq = spy_eq_full.loc[:strategy_end]
 
     stats: dict = {}
     if gated_curves is not None:
@@ -340,12 +348,15 @@ def main() -> None:
     stats["raw_long_only"]["avg_time_in_market"] = 1.0
 
     stats["spy_buy_hold"] = compute_stats(spy_eq)
+    stats["spy_buy_hold"]["end_date"] = str(strategy_end.date())
 
     os.makedirs(REPORTS_DIR, exist_ok=True)
     with open(os.path.join(REPORTS_DIR, "backtest_stats.json"), "w") as f:
         json.dump(stats, f, indent=2)
 
-    nav_df_cols: dict[str, pd.Series] = {"spy": spy_eq, "raw_long_only": raw_mean}
+    # CSV keeps the full SPY series (extends past strategy end) so the tail
+    # is visible for inspection; only stats + plot use the clipped curve.
+    nav_df_cols: dict[str, pd.Series] = {"spy": spy_eq_full, "raw_long_only": raw_mean}
     if gated_curves is not None:
         nav_df_cols["gated_long_only"] = gated_curves.mean(axis=1)
         nav_df_cols["gated_offset_p10"] = gated_curves.quantile(0.10, axis=1)
@@ -372,7 +383,10 @@ def main() -> None:
                  f"{s['offset_cagr_max']:+.2%}]")
         _print_stats("gated long-only (regime ON)", s, extra)
     _print_stats("raw long-only (regime OFF)", stats["raw_long_only"])
-    _print_stats("SPY buy & hold (benchmark)", stats["spy_buy_hold"])
+    _print_stats(
+        f"SPY buy & hold (clipped @{strategy_end.date()})",
+        stats["spy_buy_hold"],
+    )
 
     print(f"\n  -> equity curve: {REPORTS_DIR}/backtest_equity.png")
     print(f"  -> stats:        {REPORTS_DIR}/backtest_stats.json")
