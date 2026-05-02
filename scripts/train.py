@@ -42,15 +42,16 @@ REPORTS_DIR = os.path.join(_ROOT, "reports")
 DEFAULT_TRIALS = 50
 EARLY_STOPPING_ROUNDS = 50
 
-# Sane defaults for --quick. Decent baseline without tuning.
+# Defaults for --quick: best params from the 200-trial sweep
+# (val decile spread +0.0297, val IC +0.0554). Reproducible without tuning.
 DEFAULT_PARAMS: dict = {
-    "max_depth": 5,
-    "learning_rate": 0.05,
-    "n_estimators": 600,
-    "min_child_weight": 5,
-    "subsample": 0.8,
-    "colsample_bytree": 0.8,
-    "reg_lambda": 1.0,
+    "max_depth": 3,
+    "learning_rate": 0.0822,
+    "n_estimators": 860,
+    "min_child_weight": 11,
+    "subsample": 0.9487,
+    "colsample_bytree": 0.6285,
+    "reg_lambda": 0.4457,
 }
 
 
