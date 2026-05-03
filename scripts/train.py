@@ -40,7 +40,7 @@ MODEL_PATH = os.path.join(_ROOT, "models", "xgb_v1.json")
 REPORTS_DIR = os.path.join(_ROOT, "reports")
 
 DEFAULT_TRIALS = 50
-EARLY_STOPPING_ROUNDS = 50
+EARLY_STOPPING_ROUNDS = 100
 
 # Defaults for --quick: best params from the 200-trial sweep
 # (val decile spread +0.0297, val IC +0.0554). Reproducible without tuning.
@@ -190,7 +190,7 @@ def _objective(
     """
     params = {
         "max_depth": trial.suggest_int("max_depth", 3, 6),
-        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
         "n_estimators": trial.suggest_int("n_estimators", 200, 1000),
         "min_child_weight": trial.suggest_int("min_child_weight", 1, 20),
         "subsample": trial.suggest_float("subsample", 0.6, 1.0),

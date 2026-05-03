@@ -40,6 +40,7 @@ from features import (  # noqa: E402
     ALL_FEATURES,
     CATEGORICAL_FEATURES,
     MARKET_FEATURES,
+    NULLABLE_FEATURES,
     PER_TICKER_FEATURES,
     compute_features,
 )
@@ -86,10 +87,14 @@ def load_panel(path: str = PANEL_PATH, drop_na: bool = True) -> pd.DataFrame:
 
     if drop_na:
         before = len(panel)
-        # Skip categorical (gics_sector) — it has its own "Unknown" bucket for
-        # tickers Wikipedia doesn't tag; pandas dropna would treat the category
-        # column inconsistently anyway.
-        numeric_required = [c for c in FEATURE_COLS if c not in CATEGORICAL_FEATURES]
+        # Skip categorical (gics_sector — has its own "Unknown" bucket) and
+        # NULLABLE_FEATURES (earnings + short-interest columns where XGBoost
+        # handles missing natively; dropping their NaN rows would gut coverage
+        # for tickers without EDGAR/FINRA records).
+        numeric_required = [
+            c for c in FEATURE_COLS
+            if c not in CATEGORICAL_FEATURES and c not in NULLABLE_FEATURES
+        ]
         panel = panel.dropna(subset=numeric_required + [TARGET_COL]).reset_index(drop=True)
         print(
             f"Loaded {before:,} rows; dropped {before - len(panel):,} early-window NaN "
@@ -154,12 +159,11 @@ def assert_no_lookahead(
     seed: int = 42,
     tol: float = 1e-6,
 ) -> None:
-    """Sample random (ticker, date) rows, truncate raw price/SPY/VIX history
-    to <= date, recompute each Bucket-1/Bucket-2 feature, and assert it matches
+    """Sample random (ticker, date) rows, truncate raw price/SPY history to
+    <= date, recompute each Bucket-1/Bucket-2 feature, and assert it matches
     the panel value. Raises AssertionError on any mismatch.
     """
-    market = load_market()
-    spy, vix = market["SPY"], market["VIX"]
+    spy = load_market()["SPY"]
 
     # Skip very early dates where features wouldn't have warmed up at all.
     candidates = panel[panel["date"] >= "2010-01-01"]
@@ -191,7 +195,7 @@ def assert_no_lookahead(
             # Date not actually a trading day for this ticker — skip.
             continue
 
-        feats = compute_features(prices_trunc, spy.loc[:d], vix.loc[:d])
+        feats = compute_features(prices_trunc, spy.loc[:d])
         recomputed = feats.iloc[-1]
 
         for col in _VERIFIABLE_COLS:

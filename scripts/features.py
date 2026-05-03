@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Compute features for the ranker.
 
-Four feature buckets:
+Five feature buckets:
   1. Per-ticker technicals  (returns, oscillators, trend, vol, volume, z-scores)
-  2. Market context         (SPY trend / RSI, VIX level + zscore, beta, excess returns)
-  3. Cross-sectional ranks  (per-date percentile of every numeric feature in {1})
-  4. Categorical            (gics_sector — XGBoost native categorical)
+  2. Market context         (beta, excess returns vs SPY — ticker-specific only;
+                             broadcast SPY/VIX features are intentionally
+                             omitted so the model can't lean on regime signal)
+  3. Sector-relative        (ret_n minus the equal-weighted within-sector mean)
+  4. Cross-sectional ranks  (per-date percentile of every numeric feature in {1})
+  5. Categorical            (gics_sector — XGBoost native categorical)
 
 LOOKAHEAD: every value on row date=D uses only data with date <= D.
 All operations are rolling / ewm / pct_change / shift(positive). No row peeks
@@ -31,6 +34,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
+from altdata import load_earnings_dates  # noqa: E402
 from data import load_market, load_prices  # noqa: E402
 from universe import (  # noqa: E402
     UNKNOWN_SECTOR,
@@ -51,17 +55,38 @@ PER_TICKER_FEATURES: list[str] = [
     "zscore_20d", "zscore_60d",
 ]
 MARKET_FEATURES: list[str] = [
-    "spy_ret_21d", "spy_trend_regime", "spy_rsi_14",
-    "vix_level", "vix_zscore_20d",
     "beta_60d", "excess_ret_5d", "excess_ret_21d",
 ]
+# Sector-relative features: ret_n minus the equal-weighted within-(date, sector)
+# mean. Computed at panel-assembly time once all tickers are stacked. Excluded
+# from the per-ticker lookahead check because they depend on cross-sectional
+# state — but they have no lookahead by construction (mean is over
+# contemporaneous returns only).
+SECTOR_FEATURES: list[str] = [
+    "excess_ret_5d_vs_sector", "excess_ret_21d_vs_sector",
+]
+# Bucket 6 — earnings calendar (per-ticker, computed from EDGAR 10-Q/10-K
+# filing dates + yfinance forward calendar for the live row). Caveat: the
+# EDGAR filing date trails the actual 8-K item-2.02 announcement by ~2-4
+# weeks, so the PEAD window here is anchored on the 10-Q filing rather than
+# the announcement. Live `days_to_earnings` blends in yfinance upcoming dates.
+EARNINGS_FEATURES: list[str] = [
+    "days_to_earnings", "days_since_earnings", "post_earnings_drift_window",
+]
+
 # Bucket 1 features that get cross-sectional ranks. Skip binary trend_regime.
 RANKABLE: list[str] = [c for c in PER_TICKER_FEATURES if c != "trend_regime"]
 RANK_FEATURES: list[str] = [f"{c}_rank" for c in RANKABLE]
 CATEGORICAL_FEATURES: list[str] = ["gics_sector"]
 
+# Features allowed to remain NaN (XGBoost handles missing natively). dataset.py
+# excludes these from its dropna gate so tickers without EDGAR coverage (mostly
+# delisted/renamed names with no current SEC CIK) keep their OHLCV-only rows.
+NULLABLE_FEATURES: list[str] = EARNINGS_FEATURES
+
 ALL_FEATURES: list[str] = (
-    PER_TICKER_FEATURES + MARKET_FEATURES + RANK_FEATURES + CATEGORICAL_FEATURES
+    PER_TICKER_FEATURES + MARKET_FEATURES + SECTOR_FEATURES
+    + EARNINGS_FEATURES + RANK_FEATURES + CATEGORICAL_FEATURES
 )
 
 
@@ -142,37 +167,17 @@ def compute_per_ticker_features(prices: pd.DataFrame) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _spy_market_features(spy: pd.DataFrame) -> pd.DataFrame:
-    """SPY-derived features (broadcast — same value for every ticker on a date)."""
-    c = spy["Close"]
-    sma50 = c.rolling(50).mean()
-    sma200 = c.rolling(200).mean()
-    delta = c.diff()
-    gain = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
-    loss = (-delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
-    rsi = 100 - 100 / (1 + gain / loss)
-    return pd.DataFrame({
-        "spy_ret_21d": c.pct_change(21),
-        "spy_trend_regime": (sma50 > sma200).astype(float),
-        "spy_rsi_14": rsi,
-    })
-
-
-def _vix_features(vix: pd.DataFrame) -> pd.DataFrame:
-    c = vix["Close"]
-    return pd.DataFrame({
-        "vix_level": c,
-        "vix_zscore_20d": (c - c.rolling(20).mean()) / c.rolling(20).std(),
-    })
-
-
 def attach_market_context(
     per_ticker: pd.DataFrame,
     prices: pd.DataFrame,
     spy: pd.DataFrame,
-    vix: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Add Bucket 2 features. `prices` needed for ticker-specific beta + excess return."""
+    """Add Bucket 2 features — only the ticker-specific ones (beta + excess
+    returns vs SPY). Broadcast market-wide features (SPY trend/RSI, VIX level)
+    are deliberately excluded — they're identical across all tickers on a given
+    date and dominate split selection without contributing to cross-sectional
+    ranking.
+    """
     out = per_ticker.copy()
 
     # Beta(60d) — rolling cov(ticker_ret, spy_ret) / var(spy_ret).
@@ -185,10 +190,6 @@ def attach_market_context(
     spy_ret_21d = spy["Close"].pct_change(21).reindex(ret_1d.index)
     out["excess_ret_5d"] = out["ret_5d"] - spy_ret_5d
     out["excess_ret_21d"] = out["ret_21d"] - spy_ret_21d
-
-    # Broadcast SPY + VIX market-wide features (date-aligned join).
-    market = _spy_market_features(spy).join(_vix_features(vix))
-    out = out.join(market.reindex(out.index))
     return out
 
 
@@ -200,11 +201,10 @@ def attach_market_context(
 def compute_features(
     prices: pd.DataFrame,
     spy: pd.DataFrame,
-    vix: pd.DataFrame,
 ) -> pd.DataFrame:
     """One ticker's full feature frame (Buckets 1 + 2). Indexed by Date."""
     bucket1 = compute_per_ticker_features(prices)
-    out = attach_market_context(bucket1, prices, spy, vix)
+    out = attach_market_context(bucket1, prices, spy)
     # Carry close for label construction + backtest pricing. Not a model feature.
     out["close"] = prices["Close"]
     return out
@@ -228,6 +228,82 @@ def add_cross_sectional_ranks(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Bucket 6 — earnings calendar (per-ticker, attached during build_panel)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+_PEAD_LO, _PEAD_HI = 1, 5
+_EARNINGS_CLIP = 90  # cap days_to / days_since at 90 — beyond that the signal flatlines
+
+
+def attach_earnings_features(
+    feats: pd.DataFrame,
+    earnings_dates: list[pd.Timestamp] | pd.DatetimeIndex,
+) -> pd.DataFrame:
+    """Add EARNINGS_FEATURES to a per-ticker frame indexed by Date.
+
+    `earnings_dates` is the sorted list of all known earnings filing dates for
+    the ticker (EDGAR historicals + optional yfinance forward calendar). For
+    each row date D:
+      days_to_earnings   = next_edate ≥ D minus D            (NaN if none known)
+      days_since_earnings = D minus most-recent edate < D    (NaN if none known)
+      post_earnings_drift_window = 1 if days_since ∈ [1, 5] else 0
+    """
+    out = feats.copy()
+    edates = pd.DatetimeIndex(earnings_dates).sort_values().unique()
+    if len(edates) == 0:
+        out["days_to_earnings"] = np.nan
+        out["days_since_earnings"] = np.nan
+        out["post_earnings_drift_window"] = 0.0
+        return out
+
+    dates = pd.DatetimeIndex(out.index)
+    edates = pd.DatetimeIndex(edates)
+
+    # `pos_next` = first index in edates where edate >= D.
+    pos_next = edates.searchsorted(dates.values, side="left")
+    has_next = pos_next < len(edates)
+    next_dates = edates[np.minimum(pos_next, len(edates) - 1)]
+    days_to = (next_dates - dates).days.to_numpy(dtype="float64")
+    days_to[~has_next] = np.nan
+
+    # `pos_prev` = last index where edate < D, i.e. searchsorted(side='left') - 1.
+    pos_prev = pos_next - 1
+    has_prev = pos_prev >= 0
+    prev_dates = edates[np.maximum(pos_prev, 0)]
+    days_since = (dates - prev_dates).days.to_numpy(dtype="float64")
+    days_since[~has_prev] = np.nan
+
+    out["days_to_earnings"] = np.clip(days_to, 0, _EARNINGS_CLIP)
+    out["days_since_earnings"] = np.clip(days_since, 0, _EARNINGS_CLIP)
+    out["post_earnings_drift_window"] = (
+        ((days_since >= _PEAD_LO) & (days_since <= _PEAD_HI)).astype("float64")
+    )
+    return out
+
+
+def add_sector_relative_returns(panel: pd.DataFrame) -> pd.DataFrame:
+    """Bucket 3 — `excess_ret_n_vs_sector = ret_n − mean(ret_n)` within
+    (date, gics_sector). Equal-weighted; the standard cross-sectional
+    sector-momentum form.
+
+    NaN for the UNKNOWN_SECTOR bucket — its members are structurally
+    heterogeneous (delisted/removed names with no real sector tag) and the
+    group mean would be noise.
+    """
+    panel = panel.copy()
+    grouped = panel.groupby(["date", "gics_sector"], observed=True, sort=False)
+    for n in (5, 21):
+        col = f"ret_{n}d"
+        panel[f"excess_{col}_vs_sector"] = panel[col] - grouped[col].transform("mean")
+
+    is_unknown = panel["gics_sector"] == UNKNOWN_SECTOR
+    if is_unknown.any():
+        panel.loc[is_unknown, SECTOR_FEATURES] = np.nan
+    return panel
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Panel assembly — stack tickers, add sector, add ranks
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -235,33 +311,46 @@ def add_cross_sectional_ranks(
 def build_panel(
     prices: dict[str, pd.DataFrame] | None = None,
     spy: pd.DataFrame | None = None,
-    vix: pd.DataFrame | None = None,
     sectors: pd.DataFrame | None = None,
     history: pd.DataFrame | None = None,
+    earnings: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build the full long-format feature panel, filtered to point-in-time
     S&P 500 membership.
 
     Columns (in order):
         date, ticker, gics_sector,
-        <PER_TICKER_FEATURES>, <MARKET_FEATURES>, <RANK_FEATURES>,
+        <PER_TICKER_FEATURES>, <MARKET_FEATURES>, <SECTOR_FEATURES>,
+        <EARNINGS_FEATURES>, <RANK_FEATURES>,
         close
     """
     if prices is None:
         prices = load_prices()
-    if spy is None or vix is None:
-        market = load_market()
-        spy = market["SPY"] if spy is None else spy
-        vix = market["VIX"] if vix is None else vix
+    if spy is None:
+        spy = load_market()["SPY"]
     if sectors is None:
         sectors = load_sectors()
     if history is None:
         history = load_history()
+    if earnings is None:
+        earnings = load_earnings_dates(include_upcoming=True)
 
-    print(f"Computing features for {len(prices)} tickers...", flush=True)
+    earnings_by_ticker: dict[str, pd.DatetimeIndex] = {}
+    if earnings is not None and not earnings.empty:
+        for tkr, grp in earnings.groupby("ticker"):
+            earnings_by_ticker[tkr] = pd.DatetimeIndex(grp["report_date"]).sort_values()
+
+    print(
+        f"Computing features for {len(prices)} tickers "
+        f"(earnings coverage: {len(earnings_by_ticker)} tickers)...",
+        flush=True,
+    )
     frames: list[pd.DataFrame] = []
     for ticker, df in tqdm(prices.items(), desc="Features"):
-        feats = compute_features(df, spy, vix)
+        feats = compute_features(df, spy)
+        feats = attach_earnings_features(
+            feats, earnings_by_ticker.get(ticker, pd.DatetimeIndex([]))
+        )
         feats["ticker"] = ticker
         frames.append(feats)
 
@@ -278,7 +367,7 @@ def build_panel(
         flush=True,
     )
 
-    # Sector (Bucket 4, categorical). Wikipedia only knows current members;
+    # Sector (Bucket 5, categorical). Wikipedia only knows current members;
     # tickers that have since left the index get UNKNOWN_SECTOR rather than NaN
     # so XGBoost's native categorical handling treats them as a real bucket.
     sector_map = sectors.set_index("Ticker")["GICS Sector"]
@@ -286,12 +375,16 @@ def build_panel(
         panel["ticker"].map(sector_map).fillna(UNKNOWN_SECTOR).astype("category")
     )
 
+    print("Computing sector-relative excess returns...", flush=True)
+    panel = add_sector_relative_returns(panel)
+
     print("Computing cross-sectional ranks...", flush=True)
     panel = add_cross_sectional_ranks(panel)
 
     cols_order = (
         ["date", "ticker", "gics_sector"]
-        + PER_TICKER_FEATURES + MARKET_FEATURES + RANK_FEATURES
+        + PER_TICKER_FEATURES + MARKET_FEATURES + SECTOR_FEATURES
+        + EARNINGS_FEATURES + RANK_FEATURES
         + ["close"]
     )
     panel = panel[cols_order].sort_values(["ticker", "date"]).reset_index(drop=True)
@@ -313,8 +406,8 @@ def main() -> None:
         prices = load_prices([args.ticker])
         if not prices:
             raise SystemExit(f"{args.ticker}: no cached data (or <500 rows). Run scripts/data.py first.")
-        market = load_market()
-        feats = compute_features(prices[args.ticker], market["SPY"], market["VIX"])
+        spy = load_market()["SPY"]
+        feats = compute_features(prices[args.ticker], spy)
         print(f"\n{args.ticker} — last 5 rows ({feats.shape[0]} total, {feats.shape[1]} cols):")
         with pd.option_context("display.width", 220, "display.max_columns", 50):
             print(feats.tail(5))

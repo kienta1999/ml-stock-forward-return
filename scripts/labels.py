@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 """Forward-return labels.
 
-label = close[t+N] / close[t] - 1   (default N = 21 trading days)
+raw       = close[t+N] / close[t] - 1   (default N = 21 trading days)
+demeaned  = raw - mean(raw across all tickers on date t)
+
+The model trains on the *demeaned* (cross-sectional excess) label so it can
+only learn within-date ordering, not market direction. This forces stock
+selection rather than regime forecasting. Per-date mean is zero by
+construction, so SPY/VIX/regime features can't earn reward.
+
+The raw `forward_Nd_return` column stays on the panel for diagnostics and
+backtest pricing.
 
 Per spec: drop rows where the label is NaN — that's the last N trading days
 of each ticker (no future data to compute against).
@@ -25,8 +34,9 @@ FEATURES_PATH = os.path.join(_ROOT, "data", "processed", "features.parquet")
 PANEL_PATH = os.path.join(_ROOT, "data", "processed", "panel.parquet")
 
 FORWARD_DAYS = 21
-LABEL_COL = f"forward_{FORWARD_DAYS}d_return"
-CLIP_PCT = 0.5  # cap labels at ±50% so dead-ticker crashes don't dominate MSE
+RAW_LABEL_COL = f"forward_{FORWARD_DAYS}d_return"
+LABEL_COL = f"{RAW_LABEL_COL}_demeaned"
+CLIP_PCT = 0.5  # cap raw labels at ±50% so dead-ticker crashes don't dominate MSE
 
 
 def forward_return(close: pd.Series, days: int = FORWARD_DAYS) -> pd.Series:
@@ -40,29 +50,38 @@ def add_label(
     drop_na: bool = True,
     clip: float | None = CLIP_PCT,
 ) -> pd.DataFrame:
-    """Add forward-return column to a long panel sorted by (ticker, date).
+    """Add raw + date-demeaned forward-return columns to a long panel.
 
     Requires `panel` to carry a `close` column (features.build_panel does).
-    `clip`: cap labels at ±clip (None disables). Without it a few delisted-ticker
-    -100% labels blow up MSE and force best_iteration → 1.
+    `clip` caps the *raw* label at ±clip (None disables) — without it a few
+    delisted-ticker −100% labels blow up MSE and force best_iteration → 1.
+    The demeaned label is computed from the clipped raw values so dead-ticker
+    outliers don't drag the per-date mean.
     """
     if "close" not in panel.columns:
         raise ValueError("panel needs a 'close' column — see features.build_panel")
 
     panel = panel.sort_values(["ticker", "date"]).reset_index(drop=True)
-    label_col = f"forward_{days}d_return"
-    panel[label_col] = panel.groupby("ticker", sort=False)["close"].transform(
+    raw_col = f"forward_{days}d_return"
+    panel[raw_col] = panel.groupby("ticker", sort=False)["close"].transform(
         lambda s: s.shift(-days) / s - 1
     )
     if drop_na:
-        panel = panel.dropna(subset=[label_col]).reset_index(drop=True)
+        panel = panel.dropna(subset=[raw_col]).reset_index(drop=True)
     if clip is not None:
-        n_clipped = ((panel[label_col] < -clip) | (panel[label_col] > clip)).sum()
-        panel[label_col] = panel[label_col].clip(-clip, clip)
+        n_clipped = ((panel[raw_col] < -clip) | (panel[raw_col] > clip)).sum()
+        panel[raw_col] = panel[raw_col].clip(-clip, clip)
         print(
-            f"Clipped {n_clipped:,} of {len(panel):,} labels to ±{clip} "
+            f"Clipped {n_clipped:,} of {len(panel):,} raw labels to ±{clip} "
             f"({n_clipped / max(len(panel), 1):.2%})."
         )
+
+    # Date-demean: subtract the cross-sectional mean per date. The model
+    # trains on this column so it can only learn within-date ordering.
+    demeaned_col = f"{raw_col}_demeaned"
+    panel[demeaned_col] = (
+        panel[raw_col] - panel.groupby("date")[raw_col].transform("mean")
+    )
     return panel
 
 
@@ -85,12 +104,14 @@ def main() -> None:
     panel = pd.read_parquet(args.features)
     n_before = len(panel)
     panel = add_label(panel, days=args.days)
-    label_col = f"forward_{args.days}d_return"
+    raw_col = f"forward_{args.days}d_return"
+    demeaned_col = f"{raw_col}_demeaned"
     print(
-        f"Added {label_col}. Rows: {n_before:,} → {len(panel):,} "
+        f"Added {raw_col} + {demeaned_col}. Rows: {n_before:,} → {len(panel):,} "
         f"(dropped {n_before - len(panel):,} tail rows with NaN label)."
     )
-    print(f"Label stats:\n{panel[label_col].describe().to_string()}")
+    print(f"\nRaw label stats:\n{panel[raw_col].describe().to_string()}")
+    print(f"\nDemeaned label stats:\n{panel[demeaned_col].describe().to_string()}")
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     panel.to_parquet(args.out, index=False)
