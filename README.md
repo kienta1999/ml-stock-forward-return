@@ -1115,6 +1115,7 @@ backtest.py reports summary stats; the interesting questions need slicing.
 - [ ] system: ensemble of 5 boosters with different seeds — average predictions (free, ~½ day, +5–15% Sharpe)
 - [ ] re-run null test on the clean-architecture model (current null-test table is stale)
 - [ ] data: swap yfinance → Sharadar (or equivalent) for delisted-ticker coverage — do before going live
+- [ ] Make today.py read from features instead of from panel
 
 Paste this to claude to ask
 claude --resume b63b90f4-923f-419f-b30e-00cd9006952f
