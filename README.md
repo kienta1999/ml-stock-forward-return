@@ -1121,3 +1121,4 @@ Paste this to claude to ask
 claude --resume b63b90f4-923f-419f-b30e-00cd9006952f
 claude --resume 7762f7ea-721e-4179-a24b-273d86c65f0e
 claude --resume 94d5520c-9a4b-460f-9e6d-b16cc80211b4
+claude --resume df27d2b6-5402-4381-89c2-89a7b3fb0d76 (insider)
