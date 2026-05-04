@@ -40,7 +40,7 @@ below for the full lineage of how the architecture changed.
 
 **FINRA short interest attempted, dropped.** The original §1 plan was
 short interest from FINRA bi-monthly. The download infrastructure shipped
-(`scripts/altdata.py --source finra`) but the FINRA CDN archive only
+(`scripts/deprecated_short_interest.py`) but the FINRA CDN archive only
 goes back to **2018-08**, not 2007. With train=2007–2017 fully NaN for
 `days_to_cover`, XGBoost cannot build any tree splits on the feature
 during training (no train variance → no info gain → never selected).
@@ -130,9 +130,11 @@ uv run python scripts/universe.py                   # build membership history +
 uv run python scripts/data.py --tickers AAPL,MSFT   # 10s smoke test first
 uv run python scripts/data.py                       # 917 historical tickers + SPY + VIX (~30–45 min first time; ~520 succeed via yfinance)
 
-uv run python scripts/altdata.py --source edgar     # SEC EDGAR 10-Q/10-K filing dates per ticker (~5 min first time)
-uv run python scripts/altdata.py --source finra     # FINRA bi-monthly short interest (cache only — feature not currently wired)
-uv run python scripts/altdata.py                    # both EDGAR + FINRA at once
+uv run python scripts/earnings.py                   # SEC EDGAR 10-Q/10-K filing dates + yfinance forward calendar (~5 min first time)
+uv run python scripts/earnings.py --tickers AAPL,MSFT  # subset for smoke-test
+uv run python scripts/fundamentals.py                # SEC EDGAR XBRL TTM income + MRQ balance sheet → per-ticker parquet (~10-15 min first time)
+uv run python scripts/fundamentals.py --smoke        # one-ticker dry-run before the full pull
+# scripts/deprecated_short_interest.py is shipped but not wired — FINRA archive only goes back to 2018-08
 
 uv run python scripts/features.py --ticker AAPL     # smoke-print one ticker's features
 uv run python scripts/features.py                   # build full panel → data/processed/features.parquet
@@ -143,6 +145,7 @@ uv run python scripts/dataset.py --quick            # same, skip the slow recomp
 uv run python scripts/train.py                      # optuna tuning + final fit (~10-15 min)
 uv run python scripts/train.py --trials 20          # faster tune
 uv run python scripts/train.py --quick              # skip tuning, use sane defaults
+uv run python scripts/train.py --quick --seed 3     # vary RNG (XGBoost + optuna) for stability-selection sweeps
 
 uv run python scripts/backtest.py                    # long-only + gated, 21 shifted starts (~1 min)
 uv run python scripts/backtest.py --no-overlay       # skip gated variant
@@ -313,9 +316,13 @@ is anchored on the report filing rather than the announcement.
 Switching to 8-K item filtering would require one extra request per
 filing and is queued under [Next steps](#next-steps).
 
-`scripts/altdata.py` handles the EDGAR + FINRA pipelines (separate
-from `data.py` because the cadences and rate-limit contracts differ).
-Per-ticker earnings parquets live at `data/earnings/{TICKER}.parquet`.
+`scripts/earnings.py` handles the EDGAR 10-Q/10-K pipeline + yfinance
+forward calendar (separate from `data.py` because the cadences and
+rate-limit contracts differ). `scripts/fundamentals.py` is the parallel
+pipeline for EDGAR XBRL fundamentals. `scripts/deprecated_short_interest.py`
+holds the FINRA pipeline (deferred — archive only goes back to 2018-08).
+Per-ticker parquets live at `data/earnings/{TICKER}.parquet` and
+`data/fundamentals/{TICKER}.parquet`.
 
 ### Bucket 5 — categorical (1)
 
@@ -817,7 +824,7 @@ Items below are mostly free; each has a self-contained payoff.
 
 FINRA publishes short interest as % of float for every NMS-listed stock
 on a bi-monthly cadence. Free, downloadable as pipe-delimited CSVs.
-Download infrastructure shipped (`scripts/altdata.py --source finra`,
+Download infrastructure shipped (`scripts/deprecated_short_interest.py`,
 URL `cdn.finra.org/equity/otcmarket/biweekly/shrt{YYYYMMDD}.csv`).
 
 **Why deferred**: the FINRA CDN archive starts at **2018-08-15**, not
@@ -1092,7 +1099,7 @@ backtest.py reports summary stats; the interesting questions need slicing.
 - [x] fix `backtest.py` SPY end-date so headline CAGR compares like-for-like
 - [x] **feature: earnings calendar from SEC EDGAR 10-Q/10-K + yfinance forward dates** — `days_to_earnings`, `days_since_earnings`, `post_earnings_drift_window`. `days_since_earnings` lands at 14th in feature importance (0.037 gain); other two are 0.0 (kept pending review). Test CAGR +15.5% → +17.5%, `best_iteration` 3 → 10
 - [ ] follow-up: switch earnings dates from 10-Q filing to 8-K item 2.02 announcement (one extra request per filing, but anchors PEAD on the actual market-moving event ~14d earlier than 10-Q)
-- [~] feature: short interest from FINRA bi-monthly — **deferred**. Download infrastructure shipped (`scripts/altdata.py --source finra`) but FINRA CDN archive starts mid-2018, so train=2007–2017 has 0% coverage and XGBoost cannot build splits on the feature. Mean-fill rejected (regime leak); sliding splits forward sacrifices test bear coverage. Revisit when paid historical short interest is added or when splits are re-platformed
+- [~] feature: short interest from FINRA bi-monthly — **deferred**. Download infrastructure shipped (`scripts/deprecated_short_interest.py`) but FINRA CDN archive starts mid-2018, so train=2007–2017 has 0% coverage and XGBoost cannot build splits on the feature. Mean-fill rejected (regime leak); sliding splits forward sacrifices test bear coverage. Revisit when paid historical short interest is added or when splits are re-platformed
 - [ ] feature: insider transactions from SEC EDGAR Form 4 (free, ~1–2 days)
 - [x] feature: SEC EDGAR XBRL fundamentals (`scripts/fundamentals.py`) — 7 ratios shipped (E/P, B/M, ROA, D/E, current_ratio, sales/op-income growth YoY) + split-adjusted shares for correct market cap. Final config: raw fundamentals + ranks + 5 broadcast SPY/VIX regime features brought back. **Iteration A** (raw, 500 trials, no regime): regressed (+17.5% → +15.1% CAGR; ceiling at decile spread 0.0182). **Iteration B** (raw + ranks + regime, 200 trials): **decile-spread ceiling broken** (+0.0182 → +0.0235), val IC +0.0568 (best ever in clean arch), but raw CAGR +16.2% — short of the +17.5% earnings-only headline. 3 of 5 regime features absorbed (vix_level, spy_rsi_14, spy_ret_21d); 2 dead fundamentals resurrected (B/M, sales_growth); 2 still dead (op_income_growth, current_ratio); all 7 fundamental ranks dead.
 - [x] follow-up to §4: prune dead features via 5-seed stability selection. **Result**: 19 features dead in all 5 seeds, 21 columns total dropped (raw + ranks). 61 → 40 features. Single-run prune was wrong — `current_ratio`, `book_to_market`, `earnings_yield`, `sales_growth_yoy` all looked dead in some runs but fired strongly in others (rare-regime signals). Methodology persisted in `train.py --seed N` flag and `reports/feature_importance_stability.csv`. See [Stability-selection prune](#stability-selection-prune).
