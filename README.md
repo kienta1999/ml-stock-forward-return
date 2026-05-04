@@ -66,7 +66,7 @@ filters and picks. Here we score and sort.
 | -------- | ---------------------------------------------------------------------------------------------------------- |
 | Universe | Point-in-time S&P 500 (1996+ membership CSV) joined with current Wikipedia sectors                         |
 | Data     | yfinance OHLCV 2005-07-01 → today (1.5y buffer for 252d warmup), per-ticker parquet cache, plus SPY + ^VIX |
-| Features | 17 per-ticker technicals + 3 ticker-specific market-context + **5 broadcast SPY/VIX regime context** + 2 sector-relative + 3 earnings calendar (EDGAR 10-Q/10-K + yfinance forward dates) + 7 XBRL fundamentals (E/P, B/M, ROA, D/E, current_ratio, sales/op-income growth) + 23 cross-sectional ranks (16 technicals + 7 fundamentals) + sector cat = **61 total**. Broadcast SPY/VIX features were originally removed in the clean-arch refactor, then brought back in the fundamentals run because date-demeaned labels prevent regime forecasting (target sums to zero per date) but *do* benefit from regime-conditional cross-sectional splits. |
+| Features | 10 per-ticker technicals + 3 ticker-specific market-context + 3 broadcast SPY/VIX regime context + 1 sector-relative + 2 earnings calendar + 6 XBRL fundamentals + 14 cross-sectional ranks + sector cat = **40 total** (down from 61 after 5-seed stability-selection prune — 19 features were dead in all 5 seeds). See [Stability-selection prune](#stability-selection-prune) below. |
 | Label    | `forward_21d_return − date_mean(forward_21d_return)` — date-demeaned (cross-sectional excess). Raw `forward_21d_return` is clipped to ±0.5 first to cap dead-ticker outliers, then demeaned. The model can only learn within-date ordering, not market direction. |
 | Split    | Train 2007–2017, Val 2018–2020, Test 2021→. Chronological. No shuffling.                                   |
 | Model    | XGBoost regressor, RMSE loss, optuna-tuned on val decile spread (max_depth ∈ [3, 6], 100 trials, ES=100 rounds) |
@@ -535,6 +535,53 @@ new feature work.
 The gated variant is rebalance-date-sensitive (CAGR offset range
 +2.69% to +13.92% across the 21 starting days) — a 11-point gap structural
 to monthly rebalance with a binary regime gate. Sleeves would smooth it.
+
+### Stability-selection prune
+
+After the 61-feature run, an aggressive single-run prune (drop everything
+with importance==0 in *one* training) was attempted. It was wrong. The
+problem: at `best_iteration=4 × max_depth=3 = 12 splits` total, importance
+is *extremely* noisy — a feature can score 0.06 in one run and 0 in
+another simply by losing the split-competition. Pruning on a single vote
+throws away real signal that happened to lose by chance.
+
+**Stability sweep**: held hyperparameters fixed at `DEFAULT_PARAMS`
+(`lr=0.082`, `n_est=860`, ES on val decile spread → ~25 trees built),
+varied only `random_state ∈ {1,2,3,4,5}`, ran `train.py --quick --seed N`
+five times on the full 61-feature panel. Each seed produces its own
+`reports/feature_importance_seed{N}.csv`. A feature is pruned only if
+importance==0 in **all 5** seeds (not 1 — true stability selection).
+
+**Across-seed variance was severe**: `best_iteration` ranged 2–25 with
+identical hyperparameters, and within-feature importance swings were
+huge — `current_ratio` scored 0 in seeds 1-4 and 0.073 in seed 5;
+`book_to_market` scored 0.031 in seed 1 and 0 in 2–5. Single-run pruning
+would have killed both as "useless." They aren't — they're rare-fire
+signals that need a regime/seed combination to activate.
+
+**Outcome — 19 features dead in all 5 seeds, pruned**:
+
+| Bucket | Pruned | Kept |
+| --- | --- | --- |
+| Per-ticker technicals (raw) | `ret_1d`, `ret_5d`, `mfi_14`, `vol_ratio`, `dist_sma50`, `trend_regime`, `rsi_14` | `ret_21d`, `ret_63d`, `macd_hist`, `atr_pct`, `vol_20d`, `vol_60d`, `dist_sma200`, `dist_52w_high`, `zscore_20d`, `zscore_60d` |
+| Per-ticker ranks | `ret_1d_rank`, `ret_5d_rank`, `ret_21d_rank`, `mfi_14_rank`, `vol_ratio_rank`, `dist_sma50_rank` | `ret_63d_rank`, `macd_hist_rank`, `atr_pct_rank`, `vol_20d_rank`, `vol_60d_rank`, `dist_sma200_rank`, `dist_52w_high_rank`, `zscore_20d_rank`, `zscore_60d_rank` |
+| Market regime broadcast | `spy_trend_regime`, `vix_zscore_20d` (subsumed by `spy_rsi_14` / `vix_level`) | `spy_ret_21d`, `spy_rsi_14`, `vix_level` |
+| Sector-relative | `excess_ret_5d_vs_sector` | `excess_ret_21d_vs_sector` |
+| Earnings calendar | `post_earnings_drift_window` (redundant with continuous `days_since_earnings`) | `days_to_earnings`, `days_since_earnings` |
+| Fundamentals (raw) | `op_income_growth_yoy` | `earnings_yield`, `book_to_market`, `roa`, `debt_to_equity`, `current_ratio`, `sales_growth_yoy` |
+| Fundamental ranks | `sales_growth_yoy_rank` | `earnings_yield_rank`, `book_to_market_rank`, `roa_rank`, `debt_to_equity_rank`, `current_ratio_rank` |
+
+**Net: 61 → 40 features** (drop 19 truly-dead + 2 dead-rank-of-marginal-raw:
+`ret_21d_rank` and `sales_growth_yoy_rank` — raw stays, rank goes).
+
+**The 9 "rock-solid" features** (non-zero in every seed): `dist_52w_high`,
+`dist_sma200_rank`, `spy_ret_21d`, `macd_hist_rank`, `debt_to_equity`,
+`vol_60d_rank`, `zscore_60d_rank`, `vix_level`, `gics_sector`. These
+collectively own ~60% of total importance.
+
+Full per-seed table: `reports/feature_importance_stability.csv`.
+Methodology lives in `train.py` via the `--seed` flag — re-run any time
+hyperparameters or feature set changes substantially.
 
 ### Result evolution: which runs produced which numbers
 
@@ -1048,7 +1095,8 @@ backtest.py reports summary stats; the interesting questions need slicing.
 - [~] feature: short interest from FINRA bi-monthly — **deferred**. Download infrastructure shipped (`scripts/altdata.py --source finra`) but FINRA CDN archive starts mid-2018, so train=2007–2017 has 0% coverage and XGBoost cannot build splits on the feature. Mean-fill rejected (regime leak); sliding splits forward sacrifices test bear coverage. Revisit when paid historical short interest is added or when splits are re-platformed
 - [ ] feature: insider transactions from SEC EDGAR Form 4 (free, ~1–2 days)
 - [x] feature: SEC EDGAR XBRL fundamentals (`scripts/fundamentals.py`) — 7 ratios shipped (E/P, B/M, ROA, D/E, current_ratio, sales/op-income growth YoY) + split-adjusted shares for correct market cap. Final config: raw fundamentals + ranks + 5 broadcast SPY/VIX regime features brought back. **Iteration A** (raw, 500 trials, no regime): regressed (+17.5% → +15.1% CAGR; ceiling at decile spread 0.0182). **Iteration B** (raw + ranks + regime, 200 trials): **decile-spread ceiling broken** (+0.0182 → +0.0235), val IC +0.0568 (best ever in clean arch), but raw CAGR +16.2% — short of the +17.5% earnings-only headline. 3 of 5 regime features absorbed (vix_level, spy_rsi_14, spy_ret_21d); 2 dead fundamentals resurrected (B/M, sales_growth); 2 still dead (op_income_growth, current_ratio); all 7 fundamental ranks dead.
-- [ ] follow-up to §4: prune dead features (op_income_growth_yoy, current_ratio, spy_trend_regime, vix_zscore_20d, all 7 fundamental ranks) and re-tune with lower learning-rate floor (0.005–0.05) to investigate whether `best_iteration=2 / lr=0.26` is a local optimum or the basin.
+- [x] follow-up to §4: prune dead features via 5-seed stability selection. **Result**: 19 features dead in all 5 seeds, 21 columns total dropped (raw + ranks). 61 → 40 features. Single-run prune was wrong — `current_ratio`, `book_to_market`, `earnings_yield`, `sales_growth_yoy` all looked dead in some runs but fired strongly in others (rare-regime signals). Methodology persisted in `train.py --seed N` flag and `reports/feature_importance_stability.csv`. See [Stability-selection prune](#stability-selection-prune).
+- [ ] retrain on the pruned 40-feature set (200-trial sweep) and re-run backtest — current `xgb_v1.json` was trained on the pre-prune 61-feature panel.
 - [ ] system: ensemble of 5 boosters with different seeds — average predictions (free, ~½ day, +5–15% Sharpe)
 - [ ] re-run null test on the clean-architecture model (current null-test table is stale)
 - [ ] data: swap yfinance → Sharadar (or equivalent) for delisted-ticker coverage — do before going live

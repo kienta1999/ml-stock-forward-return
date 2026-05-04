@@ -138,7 +138,9 @@ def _make_decile_spread_eval_metric(dates_val: np.ndarray, n_quantiles: int = 10
     return decile_spread
 
 
-def _make_model(params: dict, dates_val: pd.Series) -> xgb.XGBRegressor:
+def _make_model(
+    params: dict, dates_val: pd.Series, seed: int = 42
+) -> xgb.XGBRegressor:
     """XGBoost regressor with native categorical (gics_sector) support.
 
     Early stopping watches val decile spread (maximize, save_best) — the
@@ -156,7 +158,7 @@ def _make_model(params: dict, dates_val: pd.Series) -> xgb.XGBRegressor:
         objective="reg:squarederror",
         tree_method="hist",
         enable_categorical=True,
-        random_state=42,
+        random_state=seed,
         n_jobs=-1,
         eval_metric=_make_decile_spread_eval_metric(dates_val.to_numpy()),
         callbacks=[es],
@@ -176,6 +178,7 @@ def _objective(
     X_val: pd.DataFrame,
     y_val: pd.Series,
     dates_val: pd.Series,
+    seed: int = 42,
 ) -> float:
     """Train one model with the trial's hyperparameters; return val decile spread.
 
@@ -201,7 +204,7 @@ def _objective(
         "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
         "reg_lambda": trial.suggest_float("reg_lambda", 0.01, 10.0, log=True),
     }
-    model = _make_model(params, dates_val)
+    model = _make_model(params, dates_val, seed=seed)
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
     y_pred = model.predict(X_val)
     return decile_spread(dates_val, y_val, y_pred)
@@ -214,15 +217,16 @@ def tune(
     y_val: pd.Series,
     dates_val: pd.Series,
     n_trials: int,
+    seed: int = 42,
 ) -> tuple[dict, optuna.study.Study]:
     """Run optuna search; return (best_params, study)."""
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     study = optuna.create_study(
         direction="maximize",
-        sampler=optuna.samplers.TPESampler(seed=42),
+        sampler=optuna.samplers.TPESampler(seed=seed),
     )
     study.optimize(
-        lambda t: _objective(t, X_train, y_train, X_val, y_val, dates_val),
+        lambda t: _objective(t, X_train, y_train, X_val, y_val, dates_val, seed=seed),
         n_trials=n_trials,
         show_progress_bar=True,
     )
@@ -242,8 +246,9 @@ def fit_and_evaluate(
     y_val: pd.Series,
     dates_train: pd.Series,
     dates_val: pd.Series,
+    seed: int = 42,
 ) -> tuple[xgb.XGBRegressor, dict]:
-    model = _make_model(params, dates_val)
+    model = _make_model(params, dates_val, seed=seed)
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
 
     y_train_pred = model.predict(X_train)
@@ -277,6 +282,7 @@ def save_reports(
     metrics: dict,
     feature_cols: list[str],
     reports_dir: str,
+    seed: int = 42,
 ) -> None:
     os.makedirs(reports_dir, exist_ok=True)
 
@@ -285,6 +291,13 @@ def save_reports(
         "importance": model.feature_importances_,
     }).sort_values("importance", ascending=False).reset_index(drop=True)
     fi_df.to_csv(os.path.join(reports_dir, "feature_importance.csv"), index=False)
+    # When sweeping seeds, also save a per-seed copy so the stability-selection
+    # post-processing can pool importances across runs.
+    if seed != 42:
+        fi_df.to_csv(
+            os.path.join(reports_dir, f"feature_importance_seed{seed}.csv"),
+            index=False,
+        )
 
     if study is not None:
         study.trials_dataframe().to_csv(
@@ -327,6 +340,13 @@ def main() -> None:
         action="store_true",
         help="Skip tuning; use sane default hyperparameters.",
     )
+    ap.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed (XGBoost random_state + optuna TPE seed). "
+             "Use different values for stability-selection sweeps.",
+    )
     ap.add_argument("--out", default=MODEL_PATH)
     args = ap.parse_args()
 
@@ -342,6 +362,8 @@ def main() -> None:
 
     print(f"\nTrain: {len(X_train):,} rows  |  Val: {len(X_val):,} rows")
 
+    print(f"Seed: {args.seed}")
+
     if args.quick:
         print("\n--quick: skipping optuna, using default hyperparameters.")
         best_params = dict(DEFAULT_PARAMS)
@@ -349,7 +371,7 @@ def main() -> None:
     else:
         print(f"\nRunning optuna ({args.trials} trials, maximize val decile spread)...")
         best_params, study = tune(
-            X_train, y_train, X_val, y_val, dates_val, args.trials
+            X_train, y_train, X_val, y_val, dates_val, args.trials, seed=args.seed
         )
         print(f"\nBest val decile spread during tuning: {study.best_value:+.4f}")
         print("Best params:")
@@ -361,12 +383,13 @@ def main() -> None:
         best_params,
         X_train, y_train, X_val, y_val,
         dates_train, dates_val,
+        seed=args.seed,
     )
 
     _print_metrics(metrics)
 
     save_model(model, args.out)
-    save_reports(model, study, metrics, FEATURE_COLS, REPORTS_DIR)
+    save_reports(model, study, metrics, FEATURE_COLS, REPORTS_DIR, seed=args.seed)
     print(f"\n  -> model saved to {args.out}")
     print(f"  -> reports saved to {REPORTS_DIR}/")
 

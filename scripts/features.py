@@ -48,11 +48,19 @@ _ROOT = os.path.dirname(_HERE)
 PANEL_PATH = os.path.join(_ROOT, "data", "processed", "features.parquet")
 
 # Feature columns by bucket — kept here so labels.py / dataset.py / train.py can import them.
+# Pruned 2026-05-03 via 5-seed stability selection (--quick × seeds 1-5).
+# A feature is dropped only if importance==0 in ALL 5 seeds. Marginal features
+# (alive in just 1-2 seeds) are kept — single-run noise can easily mask real
+# signal. See `reports/feature_importance_stability.csv` for the full table.
 PER_TICKER_FEATURES: list[str] = [
-    "ret_1d", "ret_5d", "ret_21d", "ret_63d",
-    "rsi_14", "mfi_14", "macd_hist",
-    "atr_pct", "vol_20d", "vol_60d", "vol_ratio",
-    "dist_sma50", "dist_sma200", "dist_52w_high", "trend_regime",
+    # "ret_1d", "ret_5d",  # dead in 5/5
+    "ret_21d", "ret_63d",
+    # "rsi_14", "mfi_14",  # dead in 5/5
+    "macd_hist",
+    "atr_pct", "vol_20d", "vol_60d",
+    # "vol_ratio", "dist_sma50",  # dead in 5/5
+    "dist_sma200", "dist_52w_high",
+    # "trend_regime",  # dead in 5/5
     "zscore_20d", "zscore_60d",
 ]
 MARKET_FEATURES: list[str] = [
@@ -67,8 +75,11 @@ MARKET_FEATURES: list[str] = [
 # "in stress regimes high-leverage names underperform". That regime-cross-
 # section interaction is what we want and what's been missing.
 MARKET_REGIME_FEATURES: list[str] = [
-    "spy_ret_21d", "spy_trend_regime", "spy_rsi_14",
-    "vix_level", "vix_zscore_20d",
+    "spy_ret_21d",
+    # "spy_trend_regime",  # dead in 5/5 (subsumed by spy_rsi_14)
+    "spy_rsi_14",
+    "vix_level",
+    # "vix_zscore_20d",  # dead in 5/5 (subsumed by vix_level)
 ]
 # Sector-relative features: ret_n minus the equal-weighted within-(date, sector)
 # mean. Computed at panel-assembly time once all tickers are stacked. Excluded
@@ -76,7 +87,8 @@ MARKET_REGIME_FEATURES: list[str] = [
 # state — but they have no lookahead by construction (mean is over
 # contemporaneous returns only).
 SECTOR_FEATURES: list[str] = [
-    "excess_ret_5d_vs_sector", "excess_ret_21d_vs_sector",
+    # "excess_ret_5d_vs_sector",  # dead in 5/5
+    "excess_ret_21d_vs_sector",
 ]
 # Bucket 6 — earnings calendar (per-ticker, computed from EDGAR 10-Q/10-K
 # filing dates + yfinance forward calendar for the live row). Caveat: the
@@ -84,7 +96,8 @@ SECTOR_FEATURES: list[str] = [
 # weeks, so the PEAD window here is anchored on the 10-Q filing rather than
 # the announcement. Live `days_to_earnings` blends in yfinance upcoming dates.
 EARNINGS_FEATURES: list[str] = [
-    "days_to_earnings", "days_since_earnings", "post_earnings_drift_window",
+    "days_to_earnings", "days_since_earnings",
+    # "post_earnings_drift_window",  # dead in 5/5, redundant with continuous days_since
 ]
 
 # Bucket 7 — fundamentals from SEC EDGAR XBRL (TTM income/cashflow + MRQ
@@ -109,7 +122,8 @@ EARNINGS_FEATURES: list[str] = [
 FUNDAMENTAL_FEATURES: list[str] = [
     "earnings_yield", "book_to_market", "roa",
     "debt_to_equity", "current_ratio",
-    "sales_growth_yoy", "op_income_growth_yoy",
+    "sales_growth_yoy",
+    # "op_income_growth_yoy",  # dead in 5/5
 ]
 
 # Features that get cross-sectional ranks. Skip binary trend_regime.
@@ -118,10 +132,17 @@ FUNDAMENTAL_FEATURES: list[str] = [
 # current_ratio — although its rank showed 0 in the regime-less sweep
 # while raw won — gets a rank in this run so the regime-interaction
 # story can give it a fair chance. Prune later based on importance.
-RANKABLE: list[str] = (
-    [c for c in PER_TICKER_FEATURES if c != "trend_regime"]
-    + FUNDAMENTAL_FEATURES
-)
+# Explicit list — skip features whose RANK was dead in 5/5 seeds even though
+# the raw value stays: ret_21d_rank and sales_growth_yoy_rank are excluded
+# despite ret_21d / sales_growth_yoy keeping their raw form.
+RANKABLE: list[str] = [
+    "ret_63d", "macd_hist", "atr_pct",
+    "vol_20d", "vol_60d",
+    "dist_sma200", "dist_52w_high",
+    "zscore_20d", "zscore_60d",
+    "earnings_yield", "book_to_market", "roa",
+    "debt_to_equity", "current_ratio",
+]
 RANK_FEATURES: list[str] = [f"{c}_rank" for c in RANKABLE]
 CATEGORICAL_FEATURES: list[str] = ["gics_sector"]
 
@@ -131,7 +152,10 @@ CATEGORICAL_FEATURES: list[str] = ["gics_sector"]
 # The *_rank versions of fundamentals inherit NaN from their raw values (since
 # pandas .rank() preserves NaN), so they must be nullable too — otherwise the
 # dropna gate kills every pre-2009-XBRL row.
-_FUNDAMENTAL_RANKS: list[str] = [f"{c}_rank" for c in FUNDAMENTAL_FEATURES]
+# Only include ranks that actually exist (RANKABLE ∩ FUNDAMENTAL_FEATURES).
+_FUNDAMENTAL_RANKS: list[str] = [
+    f"{c}_rank" for c in FUNDAMENTAL_FEATURES if c in RANKABLE
+]
 NULLABLE_FEATURES: list[str] = (
     EARNINGS_FEATURES + FUNDAMENTAL_FEATURES + _FUNDAMENTAL_RANKS
 )
@@ -605,12 +629,15 @@ def build_panel(
     print("Computing cross-sectional ranks...", flush=True)
     panel = add_cross_sectional_ranks(panel)
 
+    # `ret_1d` is dropped from PER_TICKER_FEATURES (dead in all 5 seeds) but
+    # backtest.py still needs it for day-to-day portfolio P&L — keep it in the
+    # panel but not in the model's feature set.
     cols_order = (
         ["date", "ticker", "gics_sector"]
         + PER_TICKER_FEATURES + MARKET_FEATURES + MARKET_REGIME_FEATURES
         + SECTOR_FEATURES
         + EARNINGS_FEATURES + FUNDAMENTAL_FEATURES + RANK_FEATURES
-        + ["close"]
+        + ["ret_1d", "close"]
     )
     panel = panel[cols_order].sort_values(["ticker", "date"]).reset_index(drop=True)
     return panel
