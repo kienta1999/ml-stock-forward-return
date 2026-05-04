@@ -37,6 +37,7 @@ if _HERE not in sys.path:
 from earnings import load_earnings_dates  # noqa: E402
 from data import load_market, load_prices  # noqa: E402
 from fundamentals import load_fundamentals  # noqa: E402
+from insider import load_insider_transactions  # noqa: E402
 from universe import (  # noqa: E402
     UNKNOWN_SECTOR,
     filter_to_members,
@@ -146,6 +147,18 @@ RANKABLE: list[str] = [
 RANK_FEATURES: list[str] = [f"{c}_rank" for c in RANKABLE]
 CATEGORICAL_FEATURES: list[str] = ["gics_sector"]
 
+# Bucket 8 — insider transactions from SEC EDGAR Form 4 (asof filing_date).
+# Only direct-ownership non-derivative open-market purchases (P) and sales (S).
+# CEO/CFO open-market buying has documented cross-sectional predictive power.
+# days_since_last_insider_buy is NaN if no historical buy is on record; all
+# four features are nullable so tickers with missing EDGAR coverage keep rows.
+INSIDER_FEATURES: list[str] = [
+    "insider_buy_count_60d",
+    "insider_sell_count_60d",
+    "insider_net_dollar_60d",
+    "days_since_last_insider_buy",
+]
+
 # Features allowed to remain NaN (XGBoost handles missing natively). dataset.py
 # excludes these from its dropna gate so tickers without EDGAR coverage (mostly
 # delisted/renamed names with no current SEC CIK) keep their OHLCV-only rows.
@@ -158,12 +171,14 @@ _FUNDAMENTAL_RANKS: list[str] = [
 ]
 NULLABLE_FEATURES: list[str] = (
     EARNINGS_FEATURES + FUNDAMENTAL_FEATURES + _FUNDAMENTAL_RANKS
+    + INSIDER_FEATURES
 )
 
 ALL_FEATURES: list[str] = (
     PER_TICKER_FEATURES + MARKET_FEATURES + MARKET_REGIME_FEATURES
     + SECTOR_FEATURES
     + EARNINGS_FEATURES + FUNDAMENTAL_FEATURES + RANK_FEATURES
+    + INSIDER_FEATURES
     + CATEGORICAL_FEATURES
 )
 
@@ -459,6 +474,93 @@ def attach_fundamentals(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Bucket 8 — insider transactions (per-ticker, asof filing_date)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_INSIDER_DAYS = 60       # rolling window (calendar days)
+_INSIDER_DSB_CAP = 365   # cap days_since_last_insider_buy beyond this
+
+
+def attach_insider_features(
+    feats: pd.DataFrame,
+    insider_txns: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Add INSIDER_FEATURES to a per-ticker frame indexed by Date.
+
+    `insider_txns` is the slice of load_insider_transactions() for this ticker:
+    sorted by filing_date, columns [filing_date, transaction_code, value].
+
+    For each row date D (using filing_date as the asof key):
+      insider_buy_count_60d       = # direct open-market P transactions in (D-60d, D]
+      insider_sell_count_60d      = # direct open-market S transactions in (D-60d, D]
+      insider_net_dollar_60d      = sum(P values) − sum(S values) in (D-60d, D]
+      days_since_last_insider_buy = D − most-recent P filing_date ≤ D  (NaN if none)
+    """
+    out = feats.copy()
+
+    _NAN_DEFAULTS = {
+        "insider_buy_count_60d": 0.0,
+        "insider_sell_count_60d": 0.0,
+        "insider_net_dollar_60d": 0.0,
+        "days_since_last_insider_buy": np.nan,
+    }
+
+    if insider_txns is None or insider_txns.empty:
+        for col, val in _NAN_DEFAULTS.items():
+            out[col] = val
+        return out
+
+    insider_txns = insider_txns.sort_values("filing_date").reset_index(drop=True)
+
+    # Separate buy and sell arrays for fast searchsorted.
+    buy_mask = insider_txns["transaction_code"] == "P"
+    sell_mask = insider_txns["transaction_code"] == "S"
+
+    buy_dates = insider_txns.loc[buy_mask, "filing_date"].values.astype("datetime64[ns]")
+    buy_values = insider_txns.loc[buy_mask, "value"].fillna(0.0).values.astype(float)
+    sell_dates = insider_txns.loc[sell_mask, "filing_date"].values.astype("datetime64[ns]")
+    sell_values = insider_txns.loc[sell_mask, "value"].fillna(0.0).values.astype(float)
+
+    n = len(out)
+    buy_counts = np.zeros(n, dtype=float)
+    sell_counts = np.zeros(n, dtype=float)
+    net_dollars = np.zeros(n, dtype=float)
+    days_since_buy = np.full(n, np.nan)
+
+    window_td = np.timedelta64(_INSIDER_DAYS, "D")
+
+    for i, d in enumerate(out.index):
+        d_ns = np.datetime64(d, "ns")
+        window_lo = d_ns - window_td
+
+        # Buys in (window_lo, d_ns]
+        lo_b = int(np.searchsorted(buy_dates, window_lo, side="right"))
+        hi_b = int(np.searchsorted(buy_dates, d_ns, side="right"))
+        buy_counts[i] = hi_b - lo_b
+        if hi_b > lo_b:
+            net_dollars[i] += buy_values[lo_b:hi_b].sum()
+
+        # Sells in (window_lo, d_ns]
+        lo_s = int(np.searchsorted(sell_dates, window_lo, side="right"))
+        hi_s = int(np.searchsorted(sell_dates, d_ns, side="right"))
+        sell_counts[i] = hi_s - lo_s
+        if hi_s > lo_s:
+            net_dollars[i] -= sell_values[lo_s:hi_s].sum()
+
+        # Days since most recent buy (all history up to d)
+        if hi_b > 0:
+            last_buy = buy_dates[hi_b - 1]
+            days = float((d_ns - last_buy).astype("timedelta64[D]").astype(int))
+            days_since_buy[i] = min(days, _INSIDER_DSB_CAP)
+
+    out["insider_buy_count_60d"] = buy_counts
+    out["insider_sell_count_60d"] = sell_counts
+    out["insider_net_dollar_60d"] = net_dollars
+    out["days_since_last_insider_buy"] = days_since_buy
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Bucket 2b — broadcast market-regime features (panel-level, same value
 # per date for every ticker). Earn reward only via interactions with
 # cross-sectional features under date-demeaned labels.
@@ -544,6 +646,7 @@ def build_panel(
     history: pd.DataFrame | None = None,
     earnings: pd.DataFrame | None = None,
     fundamentals: pd.DataFrame | None = None,
+    insider: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build the full long-format feature panel, filtered to point-in-time
     S&P 500 membership.
@@ -552,7 +655,7 @@ def build_panel(
         date, ticker, gics_sector,
         <PER_TICKER_FEATURES>, <MARKET_FEATURES>, <MARKET_REGIME_FEATURES>,
         <SECTOR_FEATURES>, <EARNINGS_FEATURES>, <FUNDAMENTAL_FEATURES>,
-        <RANK_FEATURES>, close
+        <RANK_FEATURES>, <INSIDER_FEATURES>, close
     """
     if prices is None:
         prices = load_prices()
@@ -571,15 +674,22 @@ def build_panel(
         earnings = load_earnings_dates(include_upcoming=True)
     if fundamentals is None:
         fundamentals = load_fundamentals()
+    if insider is None:
+        insider = load_insider_transactions()
 
     earnings_by_ticker: dict[str, pd.DatetimeIndex] = {}
     if earnings is not None and not earnings.empty:
         for tkr, grp in earnings.groupby("ticker"):
             earnings_by_ticker[tkr] = pd.DatetimeIndex(grp["report_date"]).sort_values()
 
+    insider_by_ticker: dict[str, pd.DataFrame] = {}
+    if insider is not None and not insider.empty:
+        for tkr, grp in insider.groupby("ticker"):
+            insider_by_ticker[tkr] = grp.reset_index(drop=True)
+
     print(
         f"Computing features for {len(prices)} tickers "
-        f"(earnings coverage: {len(earnings_by_ticker)} tickers)...",
+        f"(earnings: {len(earnings_by_ticker)}, insider: {len(insider_by_ticker)})...",
         flush=True,
     )
     frames: list[pd.DataFrame] = []
@@ -587,6 +697,9 @@ def build_panel(
         feats = compute_features(df, spy)
         feats = attach_earnings_features(
             feats, earnings_by_ticker.get(ticker, pd.DatetimeIndex([]))
+        )
+        feats = attach_insider_features(
+            feats, insider_by_ticker.get(ticker)
         )
         feats["ticker"] = ticker
         frames.append(feats)
@@ -637,6 +750,7 @@ def build_panel(
         + PER_TICKER_FEATURES + MARKET_FEATURES + MARKET_REGIME_FEATURES
         + SECTOR_FEATURES
         + EARNINGS_FEATURES + FUNDAMENTAL_FEATURES + RANK_FEATURES
+        + INSIDER_FEATURES
         + ["ret_1d", "close"]
     )
     panel = panel[cols_order].sort_values(["ticker", "date"]).reset_index(drop=True)
