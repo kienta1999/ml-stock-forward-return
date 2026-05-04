@@ -9,6 +9,7 @@ data/market/
 data/processed/
 data/universe/
 data/earnings/
+data/fundamentals/
 
 
 # Trained artifacts

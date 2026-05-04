@@ -34,8 +34,9 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from altdata import load_earnings_dates  # noqa: E402
+from earnings import load_earnings_dates  # noqa: E402
 from data import load_market, load_prices  # noqa: E402
+from fundamentals import load_fundamentals  # noqa: E402
 from universe import (  # noqa: E402
     UNKNOWN_SECTOR,
     filter_to_members,
@@ -57,6 +58,18 @@ PER_TICKER_FEATURES: list[str] = [
 MARKET_FEATURES: list[str] = [
     "beta_60d", "excess_ret_5d", "excess_ret_21d",
 ]
+# Broadcast market-regime features — same value for every ticker on a given
+# date. Removed in the clean-arch refactor because they let the model time
+# the market with raw labels. RE-ADDED 2026-05-03: with date-demeaned labels,
+# a broadcast feature cannot earn reward as a standalone predictor (target
+# sums to zero per date), but CAN earn reward via interactions — e.g. a
+# tree splits on `vix_level > 25` then on `debt_to_equity_rank`, encoding
+# "in stress regimes high-leverage names underperform". That regime-cross-
+# section interaction is what we want and what's been missing.
+MARKET_REGIME_FEATURES: list[str] = [
+    "spy_ret_21d", "spy_trend_regime", "spy_rsi_14",
+    "vix_level", "vix_zscore_20d",
+]
 # Sector-relative features: ret_n minus the equal-weighted within-(date, sector)
 # mean. Computed at panel-assembly time once all tickers are stacked. Excluded
 # from the per-ticker lookahead check because they depend on cross-sectional
@@ -74,19 +87,60 @@ EARNINGS_FEATURES: list[str] = [
     "days_to_earnings", "days_since_earnings", "post_earnings_drift_window",
 ]
 
-# Bucket 1 features that get cross-sectional ranks. Skip binary trend_regime.
-RANKABLE: list[str] = [c for c in PER_TICKER_FEATURES if c != "trend_regime"]
+# Bucket 7 — fundamentals from SEC EDGAR XBRL (TTM income/cashflow + MRQ
+# balance sheet, asof-merged into the panel by `filed` date for no-lookahead).
+# Coverage caveat: 2007-01 → 2009-06 is 0% (pre-XBRL-mandate); 2009-06 → 2011-06
+# is partial (large filers only). NaN for all rows in those windows; XGBoost
+# handles missing natively.
+#   earnings_yield      = TTM net_income / market_cap          (E/P, value)
+#   book_to_market      = MRQ equity / market_cap              (B/M, value)
+#   roa                 = TTM net_income / MRQ assets          (profitability)
+#   debt_to_equity      = MRQ lt_debt / MRQ equity             (leverage)
+#   current_ratio       = MRQ assets_current / liab_current    (liquidity)
+#   sales_growth_yoy    = TTM revenue / TTM revenue 4Q ago − 1 (growth)
+#   op_income_growth_yoy = TTM op_income / TTM op_income 4Q ago − 1 (growth)
+# All 7 fundamentals retained for the regime-interaction test (2026-05-03).
+# In the rank-only sweep, B/M / sales_growth_yoy / op_income_growth_yoy
+# showed 0 importance in both raw and rank form — but those runs had no
+# regime context. Adding the 5 broadcast SPY/VIX features re-opens the
+# possibility that growth and B/M carry regime-conditional signal (e.g.
+# high-growth names underperforming in high-VIX, B/M working only in
+# trend-up regimes). Re-evaluate after the regime-included run.
+FUNDAMENTAL_FEATURES: list[str] = [
+    "earnings_yield", "book_to_market", "roa",
+    "debt_to_equity", "current_ratio",
+    "sales_growth_yoy", "op_income_growth_yoy",
+]
+
+# Features that get cross-sectional ranks. Skip binary trend_regime.
+# All fundamentals ranked for cross-sector comparability (5% E/P =
+# cheap-for-tech / median-for-banks; rank normalizes that). Even
+# current_ratio — although its rank showed 0 in the regime-less sweep
+# while raw won — gets a rank in this run so the regime-interaction
+# story can give it a fair chance. Prune later based on importance.
+RANKABLE: list[str] = (
+    [c for c in PER_TICKER_FEATURES if c != "trend_regime"]
+    + FUNDAMENTAL_FEATURES
+)
 RANK_FEATURES: list[str] = [f"{c}_rank" for c in RANKABLE]
 CATEGORICAL_FEATURES: list[str] = ["gics_sector"]
 
 # Features allowed to remain NaN (XGBoost handles missing natively). dataset.py
 # excludes these from its dropna gate so tickers without EDGAR coverage (mostly
 # delisted/renamed names with no current SEC CIK) keep their OHLCV-only rows.
-NULLABLE_FEATURES: list[str] = EARNINGS_FEATURES
+# The *_rank versions of fundamentals inherit NaN from their raw values (since
+# pandas .rank() preserves NaN), so they must be nullable too — otherwise the
+# dropna gate kills every pre-2009-XBRL row.
+_FUNDAMENTAL_RANKS: list[str] = [f"{c}_rank" for c in FUNDAMENTAL_FEATURES]
+NULLABLE_FEATURES: list[str] = (
+    EARNINGS_FEATURES + FUNDAMENTAL_FEATURES + _FUNDAMENTAL_RANKS
+)
 
 ALL_FEATURES: list[str] = (
-    PER_TICKER_FEATURES + MARKET_FEATURES + SECTOR_FEATURES
-    + EARNINGS_FEATURES + RANK_FEATURES + CATEGORICAL_FEATURES
+    PER_TICKER_FEATURES + MARKET_FEATURES + MARKET_REGIME_FEATURES
+    + SECTOR_FEATURES
+    + EARNINGS_FEATURES + FUNDAMENTAL_FEATURES + RANK_FEATURES
+    + CATEGORICAL_FEATURES
 )
 
 
@@ -282,6 +336,156 @@ def attach_earnings_features(
     return out
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Bucket 7 — fundamentals (panel-level, asof-merged from SEC XBRL)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def attach_fundamentals(
+    panel: pd.DataFrame,
+    fundamentals: pd.DataFrame,
+) -> pd.DataFrame:
+    """Asof-merge the fundamentals panel into the price panel by `(ticker,
+    asof_date <= date)` and compute the 7 ratio features.
+
+    Lookahead-safe: each row sees only fundamentals that were publicly
+    `filed` on or before the row's date. `shares_adj` is on the same
+    split-adjusted basis as `close`, so `market_cap = shares_adj × close`.
+
+    Sign-flip / divide-by-zero handling:
+      - Growth ratios set to NaN when the prior-period denominator ≤ 0.
+        A turnaround (loss → profit) reads as a *positive* signal but the
+        percent change would be encoded as a misleading negative; cleaner
+        to drop those points than to feed XGBoost the wrong sign.
+      - debt_to_equity NaN when equity ≤ 0 (technically-insolvent firms;
+        the ratio is meaningless and the few cases would dominate splits).
+      - earnings_yield can go negative cleanly (loss-making firms = low
+        value); no special handling needed.
+
+    Drops the intermediate TTM/MRQ/share columns from the output — only the
+    7 ratio features are retained on the panel.
+    """
+    if fundamentals is None or fundamentals.empty:
+        for c in FUNDAMENTAL_FEATURES:
+            panel[c] = np.nan
+        return panel
+
+    panel = panel.sort_values(["ticker", "date"]).reset_index(drop=True)
+    fund = fundamentals.sort_values(["ticker", "asof_date"]).reset_index(drop=True)
+
+    # merge_asof requires identical dtypes on the asof keys. The panel's date
+    # comes from parquet round-trip (datetime64[ms]) while the fundamentals
+    # asof_date is freshly built in pandas (datetime64[ns]); pin both to ns.
+    panel = panel.copy()
+    fund = fund.copy()
+    panel["date"] = pd.to_datetime(panel["date"]).astype("datetime64[ns]")
+    fund["asof_date"] = pd.to_datetime(fund["asof_date"]).astype("datetime64[ns]")
+
+    # merge_asof with `by="ticker"` requires both frames sorted by the asof
+    # key globally (not just within each ticker).
+    panel_sorted = panel.sort_values("date").reset_index(drop=False).rename(
+        columns={"index": "_orig_idx"}
+    )
+    fund_sorted = fund.sort_values("asof_date").reset_index(drop=True)
+
+    merged = pd.merge_asof(
+        panel_sorted,
+        fund_sorted,
+        left_on="date",
+        right_on="asof_date",
+        by="ticker",
+        direction="backward",
+    ).sort_values("_orig_idx").reset_index(drop=True)
+    merged = merged.drop(columns=["_orig_idx"])
+
+    close = merged["close"]
+    shares_adj = merged["shares_adj"]
+    market_cap = shares_adj * close
+
+    ttm_ni = merged["ttm_net_income"]
+    ttm_rev = merged["ttm_revenue"]
+    ttm_rev_prior = merged["ttm_revenue_prior"]
+    ttm_oi = merged["ttm_operating_income"]
+    ttm_oi_prior = merged["ttm_operating_income_prior"]
+    mrq_assets = merged["mrq_assets"]
+    mrq_assets_curr = merged["mrq_assets_current"]
+    mrq_liab_curr = merged["mrq_liabilities_current"]
+    mrq_equity = merged["mrq_equity"]
+    mrq_lt_debt = merged["mrq_lt_debt"]
+
+    merged["earnings_yield"] = ttm_ni / market_cap.where(market_cap > 0)
+    merged["book_to_market"] = mrq_equity / market_cap.where(market_cap > 0)
+    merged["roa"] = ttm_ni / mrq_assets.where(mrq_assets > 0)
+    merged["debt_to_equity"] = mrq_lt_debt / mrq_equity.where(mrq_equity > 0)
+    merged["current_ratio"] = mrq_assets_curr / mrq_liab_curr.where(mrq_liab_curr > 0)
+    merged["sales_growth_yoy"] = ttm_rev / ttm_rev_prior.where(ttm_rev_prior > 0) - 1
+    merged["op_income_growth_yoy"] = ttm_oi / ttm_oi_prior.where(ttm_oi_prior > 0) - 1
+
+    drop_cols = [
+        "asof_date", "period_end",
+        "ttm_revenue", "ttm_revenue_prior",
+        "ttm_net_income",
+        "ttm_operating_income", "ttm_operating_income_prior",
+        "mrq_assets", "mrq_assets_current", "mrq_liabilities_current",
+        "mrq_equity", "mrq_lt_debt",
+        "shares", "shares_adj",
+    ]
+    merged = merged.drop(columns=[c for c in drop_cols if c in merged.columns])
+    return merged
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bucket 2b — broadcast market-regime features (panel-level, same value
+# per date for every ticker). Earn reward only via interactions with
+# cross-sectional features under date-demeaned labels.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def compute_market_regime_features(
+    spy: pd.DataFrame, vix: pd.DataFrame
+) -> pd.DataFrame:
+    """Date-indexed DataFrame with 5 broadcast features. Computed once;
+    merged onto every ticker's row by date in attach_market_regime.
+    """
+    spy_close = spy["Close"]
+    vix_close = vix["Close"]
+
+    out = pd.DataFrame(index=spy_close.index)
+    out["spy_ret_21d"] = spy_close.pct_change(21)
+    out["spy_trend_regime"] = (
+        spy_close.rolling(50).mean() > spy_close.rolling(200).mean()
+    ).astype(float)
+
+    # SPY RSI(14) with Wilder's smoothing (same form as per-ticker rsi_14).
+    delta = spy_close.diff()
+    gain = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
+    out["spy_rsi_14"] = 100 - 100 / (1 + gain / loss)
+
+    out["vix_level"] = vix_close.reindex(spy_close.index)
+    vix_aligned = out["vix_level"]
+    vix_mean = vix_aligned.rolling(20).mean()
+    vix_std = vix_aligned.rolling(20).std()
+    out["vix_zscore_20d"] = (vix_aligned - vix_mean) / vix_std
+    return out
+
+
+def attach_market_regime(
+    panel: pd.DataFrame, regime: pd.DataFrame
+) -> pd.DataFrame:
+    """Merge the date-indexed regime frame onto the panel by date.
+    Same value broadcast to every ticker on a given date — that's the point.
+    """
+    panel = panel.copy()
+    regime = regime.copy()
+    regime.index.name = "date"
+    return panel.merge(
+        regime[MARKET_REGIME_FEATURES].reset_index(),
+        on="date",
+        how="left",
+    )
+
+
 def add_sector_relative_returns(panel: pd.DataFrame) -> pd.DataFrame:
     """Bucket 3 — `excess_ret_n_vs_sector = ret_n − mean(ret_n)` within
     (date, gics_sector). Equal-weighted; the standard cross-sectional
@@ -311,29 +515,38 @@ def add_sector_relative_returns(panel: pd.DataFrame) -> pd.DataFrame:
 def build_panel(
     prices: dict[str, pd.DataFrame] | None = None,
     spy: pd.DataFrame | None = None,
+    vix: pd.DataFrame | None = None,
     sectors: pd.DataFrame | None = None,
     history: pd.DataFrame | None = None,
     earnings: pd.DataFrame | None = None,
+    fundamentals: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build the full long-format feature panel, filtered to point-in-time
     S&P 500 membership.
 
     Columns (in order):
         date, ticker, gics_sector,
-        <PER_TICKER_FEATURES>, <MARKET_FEATURES>, <SECTOR_FEATURES>,
-        <EARNINGS_FEATURES>, <RANK_FEATURES>,
-        close
+        <PER_TICKER_FEATURES>, <MARKET_FEATURES>, <MARKET_REGIME_FEATURES>,
+        <SECTOR_FEATURES>, <EARNINGS_FEATURES>, <FUNDAMENTAL_FEATURES>,
+        <RANK_FEATURES>, close
     """
     if prices is None:
         prices = load_prices()
+    market = None
+    if spy is None or vix is None:
+        market = load_market()
     if spy is None:
-        spy = load_market()["SPY"]
+        spy = market["SPY"]
+    if vix is None:
+        vix = market["VIX"]
     if sectors is None:
         sectors = load_sectors()
     if history is None:
         history = load_history()
     if earnings is None:
         earnings = load_earnings_dates(include_upcoming=True)
+    if fundamentals is None:
+        fundamentals = load_fundamentals()
 
     earnings_by_ticker: dict[str, pd.DatetimeIndex] = {}
     if earnings is not None and not earnings.empty:
@@ -378,13 +591,25 @@ def build_panel(
     print("Computing sector-relative excess returns...", flush=True)
     panel = add_sector_relative_returns(panel)
 
+    print("Attaching broadcast market-regime features (SPY trend / VIX)...", flush=True)
+    regime = compute_market_regime_features(spy, vix)
+    panel = attach_market_regime(panel, regime)
+
+    print(
+        f"Attaching XBRL fundamentals "
+        f"({fundamentals['ticker'].nunique() if fundamentals is not None and not fundamentals.empty else 0} tickers)...",
+        flush=True,
+    )
+    panel = attach_fundamentals(panel, fundamentals)
+
     print("Computing cross-sectional ranks...", flush=True)
     panel = add_cross_sectional_ranks(panel)
 
     cols_order = (
         ["date", "ticker", "gics_sector"]
-        + PER_TICKER_FEATURES + MARKET_FEATURES + SECTOR_FEATURES
-        + EARNINGS_FEATURES + RANK_FEATURES
+        + PER_TICKER_FEATURES + MARKET_FEATURES + MARKET_REGIME_FEATURES
+        + SECTOR_FEATURES
+        + EARNINGS_FEATURES + FUNDAMENTAL_FEATURES + RANK_FEATURES
         + ["close"]
     )
     panel = panel[cols_order].sort_values(["ticker", "date"]).reset_index(drop=True)

@@ -189,8 +189,12 @@ def _objective(
     risk). See README v1 results.
     """
     params = {
-        "max_depth": trial.suggest_int("max_depth", 3, 6),
-        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
+        # max_depth=6 has been provably dominated across 4 sweeps (always in
+        # the worst-trial bucket). Narrowed to [3, 5] to focus search.
+        # Rank-normalized fundamentals introduce sector × value interactions
+        # that may justify depth 4-5; depth-3 still wins so far.
+        "max_depth": trial.suggest_int("max_depth", 3, 5),
+        "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.3, log=True),
         "n_estimators": trial.suggest_int("n_estimators", 200, 1000),
         "min_child_weight": trial.suggest_int("min_child_weight", 1, 20),
         "subsample": trial.suggest_float("subsample", 0.6, 1.0),

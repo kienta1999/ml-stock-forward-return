@@ -124,7 +124,8 @@ def main() -> int:
         steps.append(("Refresh S&P 500 universe", py + ["scripts/universe.py"]))
 
     steps.append(("Incremental data refresh (yfinance)", py + ["scripts/data.py"]))
-    steps.append(("Refresh EDGAR + FINRA alt-data", py + ["scripts/altdata.py"]))
+    steps.append(("Refresh EDGAR earnings calendar", py + ["scripts/earnings.py"]))
+    steps.append(("Refresh EDGAR XBRL fundamentals", py + ["scripts/fundamentals.py"]))
     steps.append(("Rebuild features panel", py + ["scripts/features.py"]))
     steps.append(("Rebuild label panel", py + ["scripts/labels.py"]))
 

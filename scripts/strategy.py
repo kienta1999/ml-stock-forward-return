@@ -23,7 +23,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from dataset import FEATURE_COLS  # noqa: E402
-from features import CATEGORICAL_FEATURES  # noqa: E402
+from features import CATEGORICAL_FEATURES, NULLABLE_FEATURES  # noqa: E402
 
 # Default knobs (override at the call site if needed).
 TOP_N = 50
@@ -108,11 +108,20 @@ def top_picks(day_panel: pd.DataFrame, top_n: int = TOP_N) -> pd.DataFrame:
 
 
 def filter_valid_features(panel: pd.DataFrame) -> pd.DataFrame:
-    """Keep rows where all numeric features are non-NaN.
+    """Keep rows where all *required* numeric features are non-NaN.
 
     Used by today.py: the most recent ~21 days have features but no label
     (forward_21d_return needs prices 21 days ahead). load_panel(drop_na=True)
     drops them; this keeps them as long as the features themselves are valid.
+
+    NULLABLE_FEATURES (earnings calendar + fundamentals) are excluded from
+    the check — they're legitimately NaN for tickers without EDGAR/XBRL
+    coverage and XGBoost handles missing natively. Without this exclusion,
+    every row with even one missing fundamental gets dropped → ~zero rows
+    survive on the live slice.
     """
-    numeric = [c for c in FEATURE_COLS if c not in CATEGORICAL_FEATURES]
-    return panel.dropna(subset=numeric)
+    required = [
+        c for c in FEATURE_COLS
+        if c not in CATEGORICAL_FEATURES and c not in NULLABLE_FEATURES
+    ]
+    return panel.dropna(subset=required)

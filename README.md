@@ -4,19 +4,31 @@ ML-based S&P 500 stock ranker. Predict each stock's forward 21-trading-day
 return independently with XGBoost, sort to get a daily ranking, long the top
 decile, hold 21 trading days, rebalance monthly with a SPY/VIX regime gate.
 
-**Current status (clean architecture + EDGAR earnings calendar,
-100-trial sweep):** raw long-only **+17.5% CAGR / Sharpe 0.73** vs SPY
-+12.7% / Sharpe 0.75 (test 2021-01-04 → 2026-03-31). **+480 bps/yr
-alpha at SPY-equivalent risk-efficiency** — strategy is 1.41× SPY's
-volatility but earns 1.38× SPY's return, so Sharpe is essentially tied.
-Final NAV 2.32× vs SPY 1.87× = 24% more wealth over 5.25 years. The
-gain over the prior clean-arch baseline (+15.5% / Sharpe 0.70) came
-from adding **EDGAR-derived earnings calendar features** —
-`days_since_earnings` ranked 14th in importance (0.037 gain), and the
-model's `best_iteration` lifted from 3 → 10, breaking the technical-
-only ceiling that hyperparameter tuning couldn't crack. The PEAD
-(post-earnings-announcement drift) signal is real, even when anchored
-on 10-Q filing dates rather than the 8-K announcement.
+**Current status (EDGAR earnings + XBRL fundamentals + SPY/VIX regime
+context, 200-trial sweep, 61 features):** raw long-only **+16.2% CAGR
+/ Sharpe 0.72** vs SPY +12.7% / Sharpe 0.75 (test 2021-01-04 →
+2026-03-31). **+350 bps/yr alpha**; Sharpe still ~0.03 below SPY (1.41×
+SPY vol, 1.27× SPY return). Final NAV 2.19× vs SPY 1.87× = +17% more
+wealth over 5.25 years. The headline trade-off: this run's decile
+spread broke through the prior 0.0182 hard ceiling — **val decile
+spread +0.0235 (+30%), val IC +0.0568 (best ever in clean arch)** —
+but the lift hasn't fully translated to backtest CAGR, suggesting the
+model now picks better *within decile* without changing top-decile
+mean meaningfully. The architectural change that broke the ceiling:
+**bringing 5 broadcast SPY/VIX regime features back** alongside the
+date-demeaned labels. Demeaning forces the model to *only* learn
+cross-sectional ordering (it can't earn reward predicting "market goes
+up"), but the regime features give trees somewhere to *condition* the
+ordering on — `if vix > 25 then split on D/E_rank` is productive even
+when the date target sums to zero. Result: 3 of 5 regime features
+land non-trivial importance (vix_level 0.058, spy_rsi_14 0.058,
+spy_ret_21d 0.034), and 2 previously-dead fundamentals resurrected
+(book_to_market 0.024, sales_growth_yoy 0.035 — both were 0 in the
+fundamentals-only run). The best earlier headline +17.5% from the
+EDGAR-earnings-only baseline is preserved as
+`models/xgb_v1_earnings.json` if needed; the current `xgb_v1.json`
+is the regime-conditioned variant with stronger ranking signal but
+weaker absolute backtest.
 
 **Legacy model preserved.** The previous iteration with broadcast
 SPY/VIX features and raw labels (+17.3% CAGR / Sharpe 0.79) is saved as
@@ -54,7 +66,7 @@ filters and picks. Here we score and sort.
 | -------- | ---------------------------------------------------------------------------------------------------------- |
 | Universe | Point-in-time S&P 500 (1996+ membership CSV) joined with current Wikipedia sectors                         |
 | Data     | yfinance OHLCV 2005-07-01 → today (1.5y buffer for 252d warmup), per-ticker parquet cache, plus SPY + ^VIX |
-| Features | 17 per-ticker + 3 market-context (ticker-specific only) + 2 sector-relative + 3 earnings calendar (EDGAR 10-Q/10-K + yfinance forward dates) + 16 cross-sectional ranks + sector cat = **42 total**. Broadcast SPY/VIX features intentionally excluded so the model can't lean on regime signal. |
+| Features | 17 per-ticker technicals + 3 ticker-specific market-context + **5 broadcast SPY/VIX regime context** + 2 sector-relative + 3 earnings calendar (EDGAR 10-Q/10-K + yfinance forward dates) + 7 XBRL fundamentals (E/P, B/M, ROA, D/E, current_ratio, sales/op-income growth) + 23 cross-sectional ranks (16 technicals + 7 fundamentals) + sector cat = **61 total**. Broadcast SPY/VIX features were originally removed in the clean-arch refactor, then brought back in the fundamentals run because date-demeaned labels prevent regime forecasting (target sums to zero per date) but *do* benefit from regime-conditional cross-sectional splits. |
 | Label    | `forward_21d_return − date_mean(forward_21d_return)` — date-demeaned (cross-sectional excess). Raw `forward_21d_return` is clipped to ±0.5 first to cap dead-ticker outliers, then demeaned. The model can only learn within-date ordering, not market direction. |
 | Split    | Train 2007–2017, Val 2018–2020, Test 2021→. Chronological. No shuffling.                                   |
 | Model    | XGBoost regressor, RMSE loss, optuna-tuned on val decile spread (max_depth ∈ [3, 6], 100 trials, ES=100 rounds) |
@@ -221,8 +233,8 @@ uv run python -c "import pandas as pd; print(pd.read_parquet('data/raw/AAPL.parq
 
 ## Features
 
-39 features per `(date, ticker)` row, in 5 buckets (4 numeric + 1
-categorical). Lists are exposed as constants in `scripts/features.py`
+61 features per `(date, ticker)` row, organized into buckets (numeric
++ 1 categorical). Lists are exposed as constants in `scripts/features.py`
 so downstream code stays in sync.
 
 ### Bucket 1 — per-ticker technicals (17)
@@ -241,24 +253,35 @@ so downstream code stays in sync.
 | `trend_regime`                           | `1.0 if sma50 > sma200 else 0.0`                            | Bull/bear trend flag.                                                                                                                                               |
 | `zscore_20d`, `zscore_60d`               | `(close − sma_n) / std_n`                                   | **Volatility-normalised** distance from mean. A 5% gap means different things for a calm vs vol-y name; this corrects for that (also the math behind Bollinger %B). |
 
-### Bucket 2 — market context (3, ticker-specific only)
+### Bucket 2a — ticker-specific market context (3)
 
 Each feature here has a *different value per ticker* on a given date.
-Broadcast SPY/VIX features (same value for every stock) were intentionally
-removed in the clean-architecture refactor — they let trees split on
-"market direction" rather than "this stock vs others," which is regime
-forecasting, not stock picking.
 
 | Feature                           | Definition                                  | What it captures                                                                                                                     |
 | --------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | `beta_60d`                        | Rolling cov(stock, SPY) / var(SPY) over 60d | Stock's sensitivity to the market. >1 amplifies, <1 dampens. Per-ticker number.                                                      |
 | `excess_ret_5d`, `excess_ret_21d` | `ret_n − spy_ret_n`                         | **Relative strength**: how much the stock beat or lagged SPY over the window. The single biggest signal for cross-sectional ranking. |
 
-**Removed from this bucket** (kept here for documentation since they may
-return when conditioned on a separate regime model): `spy_ret_21d`,
-`spy_trend_regime`, `spy_rsi_14`, `vix_level`, `vix_zscore_20d`. All five
-are broadcast (identical for every ticker on a date) so they can only
-help the model time the market, not pick stocks.
+### Bucket 2b — broadcast SPY/VIX regime context (5)
+
+Each feature here is *identical for every ticker on a given date* — pure
+market state. Originally removed in the clean-arch refactor on the
+reasoning that they let trees split on "market direction" rather than
+"this stock vs others." That was overcorrection. With **date-demeaned
+labels**, broadcast features can't earn standalone reward (the target
+sums to zero per date, so a tree that splits only on `vix_level` learns
+nothing), but they *can* condition cross-sectional splits — e.g. "in
+high-VIX regimes, split on `debt_to_equity_rank`; in low-VIX, split on
+`dist_52w_high`." The 200-trial run with regime features back hit a new
+val IC peak (+0.0568) and broke the prior decile-spread ceiling.
+
+| Feature           | Definition                              | Importance (this run) |
+| ----------------- | --------------------------------------- | --------------------- |
+| `vix_level`       | VIX close                               | 0.058 (#5)            |
+| `spy_rsi_14`      | RSI(14) on SPY close                    | 0.058 (#6)            |
+| `spy_ret_21d`     | SPY trailing 21d return                 | 0.034 (#14)           |
+| `spy_trend_regime` | `1.0 if SPY > SMA200 else 0.0`         | 0 (subsumed by `spy_rsi_14`) |
+| `vix_zscore_20d`  | `(vix − sma20) / std20`                 | 0 (subsumed by `vix_level`)  |
 
 ### Bucket 3 — sector-relative (2)
 
@@ -320,7 +343,7 @@ Every feature on row `date=D` is computed using only data with date ≤ D. All o
 
 ## Model
 
-XGBoost regressor on the 39 features. Why XGBoost: handles missing values, scales
+XGBoost regressor on the 61 features. Why XGBoost: handles missing values, scales
 to millions of rows, native categorical (`gics_sector`) without encoding, and
 gives feature importances for free.
 
@@ -529,7 +552,9 @@ produced which number.
 | Post-clip, 50-trial fixed-depth          | Point-in-time           | clip ±0.5      | with broadcast SPY/VIX    | decile-spread, 50 trials, depth=3 fixed  | +13.3%       | +8.6%      | Label clip fixed MSE blow-up but optuna landed in a too-shallow basin (`best_iteration=19`); regime-dominated.   |
 | Post-clip, 200-trial sweep (legacy)      | Point-in-time           | clip ±0.5      | with broadcast SPY/VIX    | decile-spread, 200 trials, depth ∈ [3,6] | +17.3%       | +9.7%      | `colsample_bytree=0.629` unlocked cross-sectional signal. Saved as `xgb_v1_legacy.json` for IRA deployment.       |
 | Clean architecture (no earnings, 100 trials) | Point-in-time           | clip ±0.5 + date-demeaned | no broadcast SPY/VIX (39 features) | decile-spread, 100 trials, depth ∈ [3,6], ES=100 | +15.5%       | +7.9%      | Pure stock-picking signal on technicals only. `best_iteration=3` consistently — hyperparameter tuning exhausted on this feature set; the ceiling is data, not compute.  |
-| **Current** (+ EDGAR earnings)           | Point-in-time           | clip ±0.5 + date-demeaned | clean arch + 3 EDGAR earnings features (42 features) | decile-spread, 100 trials, depth ∈ [3,6], ES=100 | **+17.5%** | **+8.8%** | First non-technical signal lands. `days_since_earnings` ranks 14th in importance; `best_iteration` lifts 3 → 10 (signal ceiling broken). Sharpe 0.73 ≈ SPY 0.75 (essentially tied). |
+| **Prior best** (+ EDGAR earnings)        | Point-in-time           | clip ±0.5 + date-demeaned | clean arch + 3 EDGAR earnings features (42 features) | decile-spread, 100 trials, depth ∈ [3,6], ES=100 | **+17.5%** | **+8.8%** | First non-technical signal lands. `days_since_earnings` ranks 14th in importance; `best_iteration` lifts 3 → 10 (signal ceiling broken). Sharpe 0.73 ≈ SPY 0.75 (essentially tied). |
+| + XBRL fundamentals (raw, 500 trials)    | Point-in-time           | clip ±0.5 + date-demeaned | + 7 raw fundamentals (49 features)                   | decile-spread, 500 trials, depth ∈ [3,6], LR ∈ [0.005,0.3], ES=100 | +15.1% | +7.7% | **Regressed.** Val IC ticked up (+0.0444 → +0.0563) but decile spread is flat (+0.0182, hard ceiling — top 10 trials all hit exactly 0.018162). `best_iteration=4`. 3 of 7 fundamentals absorbed (D/E rank 3rd at 0.082, ROA 6th at 0.075, E/P 10th at 0.046) but at the cost of zeroing 8 previously-active technicals (`vol_20d`, `ret_1d/5d/63d`, `trend_regime`, `zscore_*`). Fundamentals are *displacing* signal, not adding to it. Rank-normalized version pending. |
+| **+ fundamentals + regime context (200 trials)** | Point-in-time | clip ±0.5 + date-demeaned | + 7 fundamentals + 7 fund-ranks + 5 broadcast SPY/VIX regime (61 features) | decile-spread, 200 trials, depth ∈ [3,5], LR ∈ [0.005,0.3], ES=100 | **+16.2%** | **+9.0%** | **Decile-spread ceiling broken.** Val decile spread +0.0182 → **+0.0235** (+30%, first time off the ceiling); val IC +0.0568 (best ever in clean arch). 3 of 5 regime features earned non-trivial importance (vix_level 0.058, spy_rsi_14 0.058, spy_ret_21d 0.034); 2 previously-dead fundamentals resurrected (book_to_market 0.024, sales_growth_yoy 0.035). `best_iteration=2` with `learning_rate=0.261` — model wants very few aggressive boosts. Trade-off: ranking quality up, raw CAGR slightly down vs the +17.5% earnings-only run — the lift is concentrated *within* deciles, not at the top-decile mean the strategy trades. Saved as `xgb_v1.json` (current). |
 
 Four things to take away:
 
@@ -723,19 +748,23 @@ scripts/
 
 ## Next steps
 
-**Where we are.** Hyperparameter tuning is exhausted on the technical-
-only feature set — `best_iteration=3` is the ceiling. The clean
-architecture is honest but capped at +15.5% CAGR / Sharpe 0.70. To push
-past, we need new *data sources*, not more compute. All five items below
-are free; each has a self-contained payoff.
+**Where we are.** Two non-technical signal sources have landed (EDGAR
+earnings calendar, EDGAR XBRL fundamentals); the latest config also
+brings broadcast SPY/VIX regime features back as cross-sectional
+*context* (legitimate under date-demeaned labels, see §4). Latest:
+**+16.2% CAGR / Sharpe 0.72, val IC +0.0568, decile spread +0.0235**
+(prior 0.0182 ceiling broken). Sharpe is still ~0.03 below SPY, so
+the strategy needs another lift to clear the bar without leverage.
+Items below are mostly free; each has a self-contained payoff.
 
 > **Order of attack (per-item priority based on signal/effort):**
-> §2 earnings calendar → ✅ **done**, +2.0 CAGR pts, `best_iteration`
-> ceiling broken. Next up: §3 insider buys → §4 EDGAR fundamentals →
-> §5 ensemble. §1 short interest is deferred (FINRA archive only goes
-> back to 2018 — see headline status). The earnings result confirms
-> that non-technical signal sources do contribute on the clean
-> architecture, which validates §3–§4 as worth the engineering cost.
+> §2 earnings calendar → ✅ **done**, +2.0 CAGR pts. §4 EDGAR
+> fundamentals + regime context → ✅ **done**, decile-spread ceiling
+> broken (+0.0182 → +0.0235), val IC peaked at +0.0568, but CAGR
+> partial (+15.1 → +16.2, short of +17.5 earnings-only). Next up:
+> §3 insider buys → §5 ensemble → followup-to-§4 (prune dead features,
+> lower-LR sweep). §1 short interest deferred (FINRA archive only goes
+> back to 2018 — see headline status).
 
 ### 1. FINRA short interest — deferred
 
@@ -800,30 +829,115 @@ Real-time + historical via EDGAR's submissions API. Discipline: the
 filing date can lag the transaction date by 2 business days — use the
 *filing* date for as-of cuts to avoid lookahead.
 
-### 4. SEC EDGAR XBRL fundamentals (free, ~1 week, parser-heavy)
+### 4. SEC EDGAR XBRL fundamentals + regime context — landed, ceiling broken
 
-The biggest unlock and the biggest engineering lift. EDGAR exposes all
-10-K / 10-Q filings as XBRL with point-in-time-correct quarterly numbers.
-Parse out 4–5 starter ratios:
+**Shipped** (`scripts/fundamentals.py`): companyfacts API → per-ticker
+parquet cache → TTM income/cashflow + MRQ balance sheet → asof-merged
+into the panel by SEC `filed` date for no-lookahead. Seven ratios
+computed at panel-build time using split-adjusted shares × yfinance
+Adj Close for market cap (`fundamentals._split_factor_after` scales
+raw XBRL shares forward by cumulative split factor, so `shares_adj ×
+adj_close` gives correct historical market cap):
 
-- Trailing P/E (price / TTM earnings)
-- P/S (price / TTM revenue)
-- FCF yield (TTM FCF / market cap)
-- ROIC (TTM EBIT / invested capital)
-- Debt/equity (most-recent quarter)
+- `earnings_yield` = TTM net_income / market_cap (E/P, value)
+- `book_to_market` = MRQ equity / market_cap (B/M, value)
+- `roa` = TTM net_income / MRQ assets (profitability)
+- `debt_to_equity` = MRQ lt_debt / MRQ equity (leverage)
+- `current_ratio` = MRQ current_assets / current_liabilities (liquidity)
+- `sales_growth_yoy` = TTM revenue / TTM revenue 4Q ago − 1 (growth)
+- `op_income_growth_yoy` = TTM op_income / TTM op_income 4Q ago − 1 (growth)
 
-XBRL parsing is the hard part — concept tagging is inconsistent across
-filers, and you need a robust GAAP/IFRS concept mapper. Once the parser
-works, adding new ratios is trivial. **Free tier alternatives** that
-skip the parser pain for a less-clean first pass: SimFin (free with
-attribution), FMP (free tier 250 calls/day). These are good for a
-2-day-build-and-test before committing to the EDGAR parser.
+Concept synonym handling: revenue (`Revenues` / `RevenueFromContract...`
+/ `SalesRevenueNet`), LT debt (`LongTermDebt` / `LongTermDebtNoncurrent`),
+equity (with/without noncontrolling interest). Q4 derived from annual −
+(Q1+Q2+Q3) since 10-Ks don't separately tag Q4.
 
-After this lands, re-run train + backtest and check whether (a) val IC
-moves into the 0.07+ range, and (b) `best_iteration` lifts off 3. If
-yes, the model has graduated from "technical ranker" to real
-multi-factor stock-picker. If not, the data ceiling is harder than
-expected and paid data ($50/mo Sharadar) becomes the next move.
+**Coverage caveat**: 2007-01 → 2009-06 is 0% (pre-XBRL-mandate); 2009-06
+→ 2011-06 partial (large filers only). All 7 features are NaN there;
+XGBoost handles missing natively.
+
+**Two iterations after first wiring fundamentals in:**
+
+**Iteration A — raw values, 500 trials: regressed** (+17.5% → +15.1%
+CAGR / Sharpe 0.73 → 0.68). Hit a hard ceiling at val decile spread
+0.0182 — top 10 trials all reached *exactly* 0.018162. 3 of 7
+fundamentals absorbed (D/E 0.082, ROA 0.075, E/P 0.046); 4 dead.
+Diagnosis: at `best_iteration=4 × max_depth=3` the model had only ~12
+splits to spend; fundamentals won 3 of them and *displaced* 8
+previously-active technicals rather than adding net signal.
+
+**Iteration B — fundamentals + ranks + 5 broadcast SPY/VIX regime
+features, 200 trials: ceiling broken** (+16.2% CAGR / Sharpe 0.72;
+val IC +0.0568, decile spread **+0.0235** — first time off the
+0.0182 ceiling in 4+ sweeps). Bringing broadcast regime features
+back was the unlock. The earlier clean-arch decision to drop them
+was right *before* date-demeaning landed (where they would have
+been pure market-timing alpha) but became overcorrection *after* —
+with demeaned labels, a regime feature can't earn standalone
+reward, but it can condition cross-sectional splits.
+
+**What worked in iteration B** (from `feature_importance.csv`):
+
+| Feature | Importance | Rank | Notes |
+| --- | --- | --- | --- |
+| `dist_52w_high` | 0.187 | 1 | Unchanged anchor |
+| `dist_sma200` | 0.129 | 2 | Unchanged anchor |
+| `roa` | 0.064 | 3 | Profitability factor |
+| `excess_ret_21d_vs_sector` | 0.060 | 4 | Sector-relative momentum |
+| `vix_level` | 0.058 | 5 | **Regime — fear gauge** |
+| `spy_rsi_14` | 0.058 | 6 | **Regime — market overbought/oversold** |
+| `vol_60d_rank` | 0.050 | 7 | Cross-sectional vol rank |
+| `dist_52w_high_rank` | 0.045 | 8 | |
+| `days_since_earnings` | 0.042 | 9 | PEAD (prior signal source) |
+| `gics_sector` | 0.038 | 10 | Categorical sector |
+| `macd_hist_rank` | 0.038 | 11 | |
+| `debt_to_equity` | 0.036 | 12 | Leverage |
+| `sales_growth_yoy` | 0.035 | 13 | **Resurrected** (was 0 in iter A) |
+| `spy_ret_21d` | 0.034 | 14 | **Regime — momentum** |
+| `earnings_yield` | 0.029 | 15 | Value |
+| `book_to_market` | 0.024 | 16 | **Resurrected** (was 0 in iter A) |
+| `atr_pct` | 0.022 | 17 | |
+
+**Still dead** (0 importance even with regime context):
+`op_income_growth_yoy`, `current_ratio`, `spy_trend_regime` (subsumed by
+`spy_rsi_14`), `vix_zscore_20d` (subsumed by `vix_level`), and *all 7*
+fundamental ranks (raw values won every split competition for fundamentals).
+Also dead: most raw technicals where the rank version dominated
+(`ret_*`, `vol_20d`, `zscore_*`, `mfi_14`, etc.).
+
+**Why CAGR didn't lift to match the IC/decile-spread improvement.**
+The decile-spread metric measures top10% mean − bottom10% mean of
+realised returns. Up +30% to +0.0235 means within-decile ordering
+is sharper. But the strategy trades the top-50 *mean* — and that
+moved less. The lift is concentrated in the middle of the
+distribution (better separation between deciles 4–7) where the
+strategy doesn't operate. Net: +1.1 CAGR pts vs raw fundamentals
+(+15.1 → +16.2), but still −1.3 CAGR pts vs the leaner earnings-only
+config (+17.5). Sharpe 0.72 ≈ SPY 0.75 (within noise).
+
+**Pass/fail vs prior plan**:
+- ✅ Decile-spread ceiling broken (+0.0182 → +0.0235)
+- ✅ Val IC peaked (+0.0568, best in clean arch)
+- ✅ B/M and sales_growth resurrected (regime context unlocked them)
+- ❌ Raw CAGR did *not* exceed +17.5% — fell short
+- ❌ `best_iteration` did not lift (=2, even lower than 3-4)
+- ⚠️  Sharpe 0.72 still slightly below SPY 0.75
+
+**Next.** Three open questions:
+
+1. **Why `best_iteration=2` with `learning_rate=0.261`?** The optimiser
+   chose very few, very aggressive boosts. Worth re-running with a
+   lower-LR floor (0.005–0.05) to see if a slower-build basin exists.
+2. **Are the fundamentals' rank versions truly redundant?** All 7
+   raw fundamentals carry signal; all 7 ranks are 0. That's
+   suspicious — usually ranks add information. Drop the rank
+   columns (and the dead `op_income_growth`, `current_ratio`,
+   `spy_trend_regime`, `vix_zscore_20d`) to see whether removing
+   them lifts decile spread further. Cleaner feature set, same
+   signal.
+3. **Should the 5-feature regime block be 3?** `spy_trend_regime`
+   and `vix_zscore_20d` are dead and likely harmful (column-sample
+   noise in the optuna search).
 
 ### 5. Ensemble of 5 models (free, ~½ day)
 
@@ -933,7 +1047,8 @@ backtest.py reports summary stats; the interesting questions need slicing.
 - [ ] follow-up: switch earnings dates from 10-Q filing to 8-K item 2.02 announcement (one extra request per filing, but anchors PEAD on the actual market-moving event ~14d earlier than 10-Q)
 - [~] feature: short interest from FINRA bi-monthly — **deferred**. Download infrastructure shipped (`scripts/altdata.py --source finra`) but FINRA CDN archive starts mid-2018, so train=2007–2017 has 0% coverage and XGBoost cannot build splits on the feature. Mean-fill rejected (regime leak); sliding splits forward sacrifices test bear coverage. Revisit when paid historical short interest is added or when splits are re-platformed
 - [ ] feature: insider transactions from SEC EDGAR Form 4 (free, ~1–2 days)
-- [ ] feature: SEC EDGAR XBRL fundamentals parser — P/E, P/S, FCF yield, ROIC, debt/equity (free, ~1 week)
+- [x] feature: SEC EDGAR XBRL fundamentals (`scripts/fundamentals.py`) — 7 ratios shipped (E/P, B/M, ROA, D/E, current_ratio, sales/op-income growth YoY) + split-adjusted shares for correct market cap. Final config: raw fundamentals + ranks + 5 broadcast SPY/VIX regime features brought back. **Iteration A** (raw, 500 trials, no regime): regressed (+17.5% → +15.1% CAGR; ceiling at decile spread 0.0182). **Iteration B** (raw + ranks + regime, 200 trials): **decile-spread ceiling broken** (+0.0182 → +0.0235), val IC +0.0568 (best ever in clean arch), but raw CAGR +16.2% — short of the +17.5% earnings-only headline. 3 of 5 regime features absorbed (vix_level, spy_rsi_14, spy_ret_21d); 2 dead fundamentals resurrected (B/M, sales_growth); 2 still dead (op_income_growth, current_ratio); all 7 fundamental ranks dead.
+- [ ] follow-up to §4: prune dead features (op_income_growth_yoy, current_ratio, spy_trend_regime, vix_zscore_20d, all 7 fundamental ranks) and re-tune with lower learning-rate floor (0.005–0.05) to investigate whether `best_iteration=2 / lr=0.26` is a local optimum or the basin.
 - [ ] system: ensemble of 5 boosters with different seeds — average predictions (free, ~½ day, +5–15% Sharpe)
 - [ ] re-run null test on the clean-architecture model (current null-test table is stale)
 - [ ] data: swap yfinance → Sharadar (or equivalent) for delisted-ticker coverage — do before going live
