@@ -2,9 +2,10 @@
 """Orchestrate the daily (or full) pipeline.
 
 Modes:
-    (default)   data → features → labels → today      (daily refresh + picks)
-    --retrain   data → features → labels → train → backtest → today
-    --full      universe → data → features → labels → train → backtest → today
+    (default)         data → features → labels → today  (daily refresh + picks)
+    --retrain         data → features → labels → train → backtest → today
+    --full            universe → data → features → labels → train → backtest → today
+    --download-only   data → earnings → insider → fundamentals  (refresh caches only)
 
 Other knobs:
     --no-diff       Skip --diff for today.py (don't auto-pick a prior file)
@@ -108,6 +109,12 @@ def main() -> int:
         help="Stop before today.py (refresh + optional retrain only).",
     )
     ap.add_argument(
+        "--download-only",
+        action="store_true",
+        help="Stop after refreshing raw data caches (data, earnings, insider, "
+             "fundamentals). Skip features, labels, train, and today.",
+    )
+    ap.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the plan, don't execute.",
@@ -125,7 +132,14 @@ def main() -> int:
 
     steps.append(("Incremental data refresh (yfinance)", py + ["scripts/data.py"]))
     steps.append(("Refresh EDGAR earnings calendar", py + ["scripts/earnings.py"]))
+    steps.append(("Refresh EDGAR insider transactions (Form 4)", py + ["scripts/insider.py"]))
     steps.append(("Refresh EDGAR XBRL fundamentals", py + ["scripts/fundamentals.py"]))
+
+    if args.download_only:
+        # Skip everything after the raw-data refresh: no features, labels,
+        # train, or today. `--full` still adds universe refresh above.
+        return _execute(steps, args.dry_run)
+
     steps.append(("Rebuild features panel", py + ["scripts/features.py"]))
     steps.append(("Rebuild label panel", py + ["scripts/labels.py"]))
 
@@ -141,6 +155,10 @@ def main() -> int:
                 today_cmd += ["--diff", os.path.relpath(prev, _ROOT)]
         steps.append(("Generate today's picks", today_cmd))
 
+    return _execute(steps, args.dry_run)
+
+
+def _execute(steps: list[tuple[str, list[str]]], dry_run: bool) -> int:
     print(f"\nrun_all.py — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{len(steps)} step(s) planned:")
     for label, cmd in steps:
@@ -148,7 +166,7 @@ def main() -> int:
 
     overall_t0 = time.time()
     for label, cmd in steps:
-        code = _run(label, cmd, args.dry_run)
+        code = _run(label, cmd, dry_run)
         if code != 0:
             print(f"\n!!! Pipeline failed at: {label}")
             return code

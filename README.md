@@ -130,6 +130,9 @@ uv run python scripts/data.py                       # 917 historical tickers + S
 
 uv run python scripts/earnings.py                   # SEC EDGAR 10-Q/10-K filing dates + yfinance forward calendar (~5 min first time)
 uv run python scripts/earnings.py --tickers AAPL,MSFT  # subset for smoke-test
+uv run python scripts/insider.py                    # SEC quarterly Form 3/4/5 bulk TSV → per-ticker parquet (~5 min first time, ~80 quarter zips back to 2006q1)
+uv run python scripts/insider.py --refresh          # wipe data/insider/ and rebuild from scratch
+uv run python scripts/insider.py --tickers AAPL,MSFT  # rebuild only those tickers from already-cached zips
 uv run python scripts/fundamentals.py                # SEC EDGAR XBRL TTM income + MRQ balance sheet → per-ticker parquet (~10-15 min first time)
 uv run python scripts/fundamentals.py --smoke        # one-ticker dry-run before the full pull
 # scripts/deprecated_short_interest.py is shipped but not wired — FINRA archive only goes back to 2018-08
@@ -156,6 +159,7 @@ uv run python scripts/today.py --no-overlay                      # ignore regime
 uv run python scripts/run_all.py                  # daily: data → features → labels → today (auto --diff)
 uv run python scripts/run_all.py --retrain        # also: train + backtest
 uv run python scripts/run_all.py --full           # also: refresh universe first
+uv run python scripts/run_all.py --download-only  # just refresh raw data caches; no features/labels/train/today
 uv run python scripts/run_all.py --dry-run        # print plan, don't execute
 ```
 
@@ -179,19 +183,28 @@ code, so it's cron-friendly.
 
 Modes:
 
-| Command                 | What runs                                         |
-| ----------------------- | ------------------------------------------------- |
-| `run_all.py`            | data → features → labels → today (default daily)  |
-| `run_all.py --retrain`  | also train + backtest                             |
-| `run_all.py --full`     | also refresh universe first (`--retrain` implied) |
-| `run_all.py --no-today` | refresh + optional retrain only, skip live picks  |
-| `run_all.py --no-diff`  | run today.py without `--diff`                     |
-| `run_all.py --dry-run`  | print the plan, don't execute                     |
+| Command                       | What runs                                                                |
+| ----------------------------- | ------------------------------------------------------------------------ |
+| `run_all.py`                  | data → features → labels → today (default daily)                         |
+| `run_all.py --retrain`        | also train + backtest                                                    |
+| `run_all.py --full`           | also refresh universe first (`--retrain` implied)                        |
+| `run_all.py --download-only`  | refresh raw data caches only (data/earnings/insider/fundamentals); stop  |
+| `run_all.py --no-today`       | refresh + optional retrain only, skip live picks                         |
+| `run_all.py --no-diff`        | run today.py without `--diff`                                            |
+| `run_all.py --dry-run`        | print the plan, don't execute                                            |
+
+Use `--download-only` when you have a model you're happy with and just want
+to keep the raw caches fresh between runs (e.g. before stepping away — let
+the bulk insider zip and EDGAR submissions catch up, score later). Combine
+with `--full` to also refresh universe membership.
 
 Equivalent manual sequence (if you want to run pieces individually):
 
 ```bash
 uv run python scripts/data.py
+uv run python scripts/earnings.py
+uv run python scripts/insider.py
+uv run python scripts/fundamentals.py
 uv run python scripts/features.py
 uv run python scripts/labels.py
 uv run python scripts/today.py --diff picks/picks_<yesterday>.csv
@@ -234,7 +247,7 @@ uv run python -c "import pandas as pd; print(pd.read_parquet('data/raw/AAPL.parq
 
 ## Features
 
-61 features per `(date, ticker)` row, organized into buckets (numeric
+65 features per `(date, ticker)` row, organized into buckets (numeric
 
 - 1 categorical). Lists are exposed as constants in `scripts/features.py`
   so downstream code stays in sync.
@@ -322,6 +335,40 @@ pipeline for EDGAR XBRL fundamentals. `scripts/deprecated_short_interest.py`
 holds the FINRA pipeline (deferred — archive only goes back to 2018-08).
 Per-ticker parquets live at `data/earnings/{TICKER}.parquet` and
 `data/fundamentals/{TICKER}.parquet`.
+
+### Bucket 8 — insider transactions (4)
+
+| Feature                       | Definition                                                                                          | What it captures                                                                                                                           |
+| ----------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `insider_buy_count_60d`       | # direct open-market P (purchase) Form 4 filings in `(D − 60d, D]`                                  | Officer/director conviction buying. Cross-sectionally rare → strong signal when present.                                                   |
+| `insider_sell_count_60d`      | # direct open-market S (sale) Form 4 filings in the same window                                     | Sales are noisier (10b5-1 plans, diversification) — counted but de-weighted by net dollar.                                                 |
+| `insider_net_dollar_60d`      | `Σ(P value) − Σ(S value)` over the window, where `value = shares × price`                          | Signed dollar conviction. Positive = net insider buying, magnitude scaled by trade size.                                                   |
+| `days_since_last_insider_buy` | days from D back to the most recent P filing on or before D, capped at 365 (NaN if no buy on record) | Decaying memory of the last buy. Empty for tickers with no historical insider purchases.                                                   |
+
+**Asof key.** All four features use `filing_date` (not `transaction_date`)
+for the as-of cut. Form 4 must be filed within 2 business days of the
+trade, so the filing date is the earliest a public investor could have
+acted on the information — using it avoids lookahead. Only direct-ownership
+non-derivative `P` (open-market purchase) and `S` (open-market sale)
+transactions are kept; awards, grants, option exercises, gifts, and
+indirect-ownership filings are excluded since they carry little timing
+signal.
+
+**Data source.** SEC's DERA team publishes parsed Form 3/4/5 data as
+quarterly TSV zips at
+`https://www.sec.gov/files/structureddata/data/insider-transactions-data-sets/{YYYY}q{N}_form345.zip`.
+~80 zips cover 2006q1 → present (~600 MB total, one HTTPS GET per quarter).
+This is dramatically cheaper than scraping per-filing Form 4 XMLs through
+the EDGAR archives — a single full-universe rebuild via XML scraping took
+hours and got my IP throttled; the bulk approach finishes in minutes and
+stays well below SEC's 10 req/s limit. `scripts/insider.py` smart-incrementals:
+each run downloads any quarters missing from `data/insider/_bulk/` plus
+always re-fetches the latest cached quarter (which gets updated within-quarter
+as new filings arrive), then rebuilds `data/insider/{TICKER}.parquet` from
+the union. Skipping several runs is fine — missing quarters are picked up
+automatically. SEC publishes each quarter ~1 month after it closes, so the
+freshest filings have a publication lag; live picks already lag features by
+21 d, so this lag is not a binding constraint.
 
 ### Bucket 5 — categorical (1)
 
@@ -900,21 +947,26 @@ expose item codes, so this requires fetching each 8-K's filing index
 to filter by item (one extra request per filing). Worth it if PEAD is
 where the lift is coming from. Tracked under [TODOs](#todos).
 
-### 3. Insider transactions from SEC EDGAR Form 4 (free, ~1–2 days)
+### 3. Insider transactions from SEC EDGAR Form 4 — ✅ shipped
 
-EDGAR publishes Form 4 (insider buys/sells) as JSON and XBRL. Insider
-_buying_ (especially CEO/CFO open-market purchases at price below recent
-avg) has documented predictive power. Add:
+**Shipped** (`scripts/insider.py`): SEC's quarterly Form 3/4/5 bulk TSV
+dataset → per-ticker parquet → 4 features in [Bucket 8](#bucket-8--insider-transactions-4).
+The first attempt scraped per-filing Form 4 XMLs through EDGAR archives
+and got the source IP throttled within a few hours; the bulk-TSV rewrite
+does ~80 quarter-zip GETs total (one per quarter back to 2006q1) and
+finishes in minutes.
 
-- `insider_buy_count_60d`, `insider_sell_count_60d` (counts of officer
-  transactions in the last 60 trading days)
-- `insider_net_dollar_60d` (signed dollar volume; positive = net
-  buying)
-- `days_since_last_insider_buy`
+Features:
+- `insider_buy_count_60d`, `insider_sell_count_60d` — counts of direct
+  open-market officer transactions in the last 60 calendar days
+- `insider_net_dollar_60d` — signed dollar volume (P − S); positive = net
+  buying
+- `days_since_last_insider_buy` — decaying memory, capped at 365
 
-Real-time + historical via EDGAR's submissions API. Discipline: the
-filing date can lag the transaction date by 2 business days — use the
-_filing_ date for as-of cuts to avoid lookahead.
+Discipline: the asof key is `filing_date` (Form 4 must be filed within
+2 business days of the trade). SEC publishes each quarter ~1 month after
+quarter end; live picks lag features by 21d so the publication lag is not
+binding.
 
 ### 4. SEC EDGAR XBRL fundamentals + regime context — landed, ceiling broken
 
