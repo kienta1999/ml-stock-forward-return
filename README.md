@@ -4,13 +4,18 @@ ML-based S&P 500 stock ranker. Predict each stock's forward 21-trading-day
 return independently with XGBoost, sort to get a daily ranking, long the top
 decile, hold 21 trading days, rebalance monthly with a SPY/VIX regime gate.
 
-**Current status (5-seed stability-selection prune + 50-trial sweep on
-40 features):** raw long-only **+19.0% CAGR / Sharpe 0.76 vs SPY
-+12.7% / Sharpe 0.75** (test 2021-01-04 → 2026-03-31). **First time
-strictly exceeding SPY's Sharpe** — strategy delivers +6.3 CAGR pts
-over SPY at marginally better risk-efficiency (1.47× SPY vol, 1.49×
-SPY return). Final NAV **2.48×** vs SPY 1.87× = **+33% more wealth**
-over 5.25 years. `best_iteration=43` with `learning_rate=0.0058`
+**Current status (+ Form 4 insider transactions, 50-trial sweep on
+44 features):** raw long-only **+21.0% CAGR / Sharpe 0.81 vs SPY
++12.7% / Sharpe 0.75** (test 2021-01-04 → 2026-03-31). **Sharpe gap
+over SPY widens from +0.01 to +0.06** — strategy delivers +8.2 CAGR
+pts over SPY at 1.53× SPY vol / 1.65× SPY return. Final NAV **2.70×**
+vs SPY 1.87× = **+44% more wealth** over 5.25 years. All 4 new insider
+features earn non-zero importance (officer open-market `insider_buy_count_60d`
+strongest at rank 25/45, sells weakest at 39/45 — matches the
+literature on 10b5-1-plan noise). MaxDD widens -25.8% → -31.7%, the
+expected cost of the higher CAGR (Calmar 0.74 → 0.66 — slight
+regression on tail risk, clear win on Sharpe).
+`best_iteration=13` with `learning_rate=0.0051`
 (prior runs were stuck at 2-10) — the cleaner feature set unlocked a
 deeper, more conservative basin that the 61-feature config couldn't
 find.
@@ -538,33 +543,34 @@ mean equity curve plus the 10th/90th percentile band. Closely matches what
 21 overlapping sleeves would deliver, with much less code complexity.
 Sleeves are on the roadmap; this is the simpler-but-equivalent v1.
 
-### Results (test 2021-01-04 → 2026-03-31, 50-trial sweep on stability-pruned 40 features, demeaned labels)
+### Results (test 2021-01-04 → 2026-03-31, 50-trial sweep on 44 features incl. Form 4 insiders, demeaned labels)
 
 `backtest.py` clips the SPY benchmark to the strategy's last predictable
 date so the headline comparison is apples-to-apples by default; the CSV
 keeps the full SPY series so the post-strategy tail is visible for
 inspection.
 
-**Current model (`models/xgb_v1_stability_pruned.json`, snapshot saved):**
+**Current model (`models/xgb_v1.json`, retrained 2026-05-08 with insiders):**
 
 | Variant                              | CAGR       | Vol   | Sharpe    | Max DD | Final NAV | Time-in-market |
 | ------------------------------------ | ---------- | ----- | --------- | ------ | --------- | -------------- |
-| **Raw long-only**                    | **+19.0%** | 25.0% | **+0.76** | -25.8% | **2.48×** | 100%           |
-| Gated long-only                      | +10.2%     | 17.1% | +0.59     | -21.1% | 1.66×     | 77%            |
+| **Raw long-only**                    | **+21.0%** | 25.9% | **+0.81** | -31.7% | **2.70×** | 100%           |
+| Gated long-only                      | +12.0%     | 17.7% | +0.68     | -24.5% | 1.80×     | 77%            |
 | SPY buy & hold (clipped @2026-03-31) | +12.7%     | 17.0% | +0.75     | -24.5% | 1.87×     | —              |
 
-**Reading the table honestly:** raw beats SPY by +6.3 CAGR points and
-**Sharpe strictly exceeds SPY for the first time (0.76 vs 0.75)**.
-Strategy runs at 1.47× SPY's vol but earns 1.49× SPY's return —
-risk-efficiency is now slightly better than the benchmark, not just
-tied. Final NAV 2.48 vs 1.87 = **+33% more wealth** over 5.25 years.
-Gated still underperforms SPY (regime gate is giving up upside it
-doesn't earn back; redundant when SPY/VIX features are already inside
-the model). The lift over the prior 61-feature run (+16.2% / 0.72)
-came from the **5-seed stability-selection prune** (61 → 40
-features) — the cleaner panel let optuna find a slow-build basin
-(`best_iteration=43, lr=0.0058`) that it couldn't with 21 noise
-columns.
+**Reading the table honestly:** raw beats SPY by +8.2 CAGR points and
+**the Sharpe gap over SPY widens from +0.01 to +0.06** (0.81 vs 0.75).
+Strategy runs at 1.53× SPY's vol but earns 1.65× SPY's return —
+risk-efficiency keeps improving over the benchmark. Final NAV 2.70 vs
+1.87 = **+44% more wealth** over 5.25 years. The cost of the higher
+CAGR is a deeper drawdown (-25.8% → -31.7%); Calmar dips 0.74 → 0.66.
+Sharpe is the metric we've been tracking, so this is a clear forward
+step on the headline yardstick. Gated still trails SPY (regime gate
+gives up upside it doesn't earn back; redundant when SPY/VIX features
+are already inside the model). The lift over the prior 40-feature
+stability-pruned run (+19.0% / 0.76) came from adding the 4 insider
+features — all 4 earned non-zero importance, with `insider_buy_count_60d`
+strongest at rank 25/45.
 
 ### Why default top-40, raw (no gate)
 
@@ -686,6 +692,7 @@ produced which number.
 | + XBRL fundamentals (raw, 500 trials)              | Point-in-time            | clip ±0.5 + date-demeaned | + 7 raw fundamentals (49 features)                                         | decile-spread, 500 trials, depth ∈ [3,6], LR ∈ [0.005,0.3], ES=100 | +15.1%     | +7.7%      | **Regressed.** Val IC ticked up (+0.0444 → +0.0563) but decile spread is flat (+0.0182, hard ceiling — top 10 trials all hit exactly 0.018162). `best_iteration=4`. 3 of 7 fundamentals absorbed (D/E rank 3rd at 0.082, ROA 6th at 0.075, E/P 10th at 0.046) but at the cost of zeroing 8 previously-active technicals (`vol_20d`, `ret_1d/5d/63d`, `trend_regime`, `zscore_*`). Fundamentals are _displacing_ signal, not adding to it. Rank-normalized version pending. |
 | + fundamentals + regime context (200 trials)       | Point-in-time            | clip ±0.5 + date-demeaned | + 7 fundamentals + 7 fund-ranks + 5 broadcast SPY/VIX regime (61 features) | decile-spread, 200 trials, depth ∈ [3,5], LR ∈ [0.005,0.3], ES=100 | +16.2%     | +9.0%      | Decile-spread ceiling broken (+0.0182 → +0.0235); val IC +0.0568 (best in clean arch). `best_iteration=2`, `learning_rate=0.261` — model wants few aggressive boosts. Ranking quality up but raw CAGR short of the +17.5% earnings-only headline.                                                                                                                                                                                                                          |
 | **+ 5-seed stability-selection prune (50 trials)** | Point-in-time            | clip ±0.5 + date-demeaned | 40 features (61 minus 19 dead-in-all-5-seeds + 2 dead-rank-only)           | decile-spread, 50 trials, depth ∈ [3,5], LR ∈ [0.005,0.3], ES=100  | **+19.0%** | **+10.2%** | **First Sharpe > SPY (0.76 vs 0.75).** `best_iteration=43, learning_rate=0.0058` — the cleaner feature set unlocked a slow-build basin the 61-feature config couldn't find (was stuck at lr~0.26 / 2 trees). Val decile spread +0.0193, val IC +0.0417 (lower than 61-feature run, but test CAGR up). Saved as `xgb_v1_stability_pruned.json`.                                                                                                                             |
+| **+ Form 4 insider transactions (50 trials)**      | Point-in-time            | clip ±0.5 + date-demeaned | 44 features (40 + 4 insider: buy/sell counts, net dollar, days-since-buy)  | decile-spread, 50 trials, depth ∈ [3,5], LR ∈ [0.005,0.3], ES=100  | **+21.0%** | **+12.0%** | **Sharpe 0.81 vs SPY 0.75 (gap widens from +0.01 to +0.06).** All 4 insider features earn non-zero importance — `insider_buy_count_60d` rank 25/45, `insider_sell_count_60d` weakest at 39/45 (matches 10b5-1-plan-noise literature). `best_iteration=13, learning_rate=0.0051`. MaxDD widens -25.8% → -31.7% (Calmar 0.74 → 0.66) — expected cost of higher CAGR. Bulk-TSV pipeline replaces a per-XML scraper that got the source IP throttled. Saved as `xgb_v1.json`. |
 
 Four things to take away:
 
@@ -879,22 +886,23 @@ scripts/
 
 ## Next steps
 
-**Where we are.** Three non-technical signal sources have landed
+**Where we are.** Four non-technical signal sources have landed
 (EDGAR earnings calendar, EDGAR XBRL fundamentals, SPY/VIX regime
-context). The 5-seed stability-selection prune dropped 21 noise
-columns; the cleaner 40-feature panel unlocked a slow-build basin
-(`best_iteration=43, lr=0.0058`) that the 61-feature config couldn't
-find. Latest: **raw +19.0% CAGR / Sharpe 0.76 vs SPY +12.7% / 0.75**
-— first time exceeding SPY's Sharpe. The Sharpe-parity bar is
-cleared. Items below are mostly free; each is a self-contained
-payoff for further alpha.
+context, Form 4 insider transactions). Latest: **raw +21.0% CAGR /
+Sharpe 0.81 vs SPY +12.7% / 0.75** — Sharpe gap over SPY widened
+from +0.01 to +0.06. Each new signal source has earned its keep:
+all 44 features in the current panel post non-zero importance except
+for 4 still-dead columns flagged for the next stability-selection
+prune. Items below are mostly free; each is a self-contained payoff
+for further alpha.
 
 > **Order of attack (per-item priority based on signal/effort):**
 > §2 earnings calendar → ✅ **done**, +2.0 CAGR pts.
 > §4 EDGAR fundamentals + regime context + stability-selection prune
-> → ✅ **done**, **+19.0% CAGR / Sharpe 0.76 (first time > SPY's 0.75).**
-> Next up: **§3 insider buys** (free, ~1-2 days, fundamentals-style
-> signal source) → **§5 ensemble of 5 seeds** (free, ~½ day, +5-15%
+> → ✅ **done**, +19.0% CAGR / Sharpe 0.76 (first time > SPY).
+> §3 Form 4 insider transactions → ✅ **done**, **+21.0% CAGR /
+> Sharpe 0.81** (Sharpe gap over SPY widens to +0.06).
+> Next up: **§5 ensemble of 5 seeds** (free, ~½ day, +5-15%
 > Sharpe, also a natural extension of the seed-sweep we just used for
 > pruning) → §6 paid delisted-ticker prices (do before going live —
 > ~3-5 CAGR pts of survivorship deflation expected). §1 short interest
@@ -1188,14 +1196,16 @@ backtest.py reports summary stats; the interesting questions need slicing.
 - [x] **feature: earnings calendar from SEC EDGAR 10-Q/10-K + yfinance forward dates** — `days_to_earnings`, `days_since_earnings`, `post_earnings_drift_window`. `days_since_earnings` lands at 14th in feature importance (0.037 gain); other two are 0.0 (kept pending review). Test CAGR +15.5% → +17.5%, `best_iteration` 3 → 10
 - [ ] follow-up: switch earnings dates from 10-Q filing to 8-K item 2.02 announcement (one extra request per filing, but anchors PEAD on the actual market-moving event ~14d earlier than 10-Q)
 - [~] feature: short interest from FINRA bi-monthly — **deferred**. Download infrastructure shipped (`scripts/deprecated_short_interest.py`) but FINRA CDN archive starts mid-2018, so train=2007–2017 has 0% coverage and XGBoost cannot build splits on the feature. Mean-fill rejected (regime leak); sliding splits forward sacrifices test bear coverage. Revisit when paid historical short interest is added or when splits are re-platformed
-- [ ] feature: insider transactions from SEC EDGAR Form 4 (free, ~1–2 days)
+- [x] feature: insider transactions from SEC EDGAR Form 4 (`scripts/insider.py`) — bulk-TSV approach via SEC DERA's quarterly Form 3/4/5 dataset (~80 zips back to 2006q1, downloads in minutes). 4 features (buy/sell counts in 60d, net dollar volume, days-since-last-buy). All 4 earn non-zero importance; `insider_buy_count_60d` strongest at rank 25/45. Replaced an earlier per-XML scraper that got the source IP throttled.
 - [x] feature: SEC EDGAR XBRL fundamentals (`scripts/fundamentals.py`) — 7 ratios shipped (E/P, B/M, ROA, D/E, current_ratio, sales/op-income growth YoY) + split-adjusted shares for correct market cap. Final config: raw fundamentals + ranks + 5 broadcast SPY/VIX regime features brought back. **Iteration A** (raw, 500 trials, no regime): regressed (+17.5% → +15.1% CAGR; ceiling at decile spread 0.0182). **Iteration B** (raw + ranks + regime, 200 trials): **decile-spread ceiling broken** (+0.0182 → +0.0235), val IC +0.0568 (best ever in clean arch), but raw CAGR +16.2% — short of the +17.5% earnings-only headline. 3 of 5 regime features absorbed (vix_level, spy_rsi_14, spy_ret_21d); 2 dead fundamentals resurrected (B/M, sales_growth); 2 still dead (op_income_growth, current_ratio); all 7 fundamental ranks dead.
 - [x] follow-up to §4: prune dead features via 5-seed stability selection. **Result**: 19 features dead in all 5 seeds, 21 columns total dropped (raw + ranks). 61 → 40 features. Single-run prune was wrong — `current_ratio`, `book_to_market`, `earnings_yield`, `sales_growth_yoy` all looked dead in some runs but fired strongly in others (rare-regime signals). Methodology persisted in `train.py --seed N` flag and `reports/feature_importance_stability.csv`. See [Stability-selection prune](#stability-selection-prune).
 - [x] retrain on the pruned 40-feature set (50-trial sweep) and re-run backtest. **Result**: raw +19.0% CAGR / Sharpe 0.76 (first time > SPY's 0.75); `best_iteration` lifted to 43 with `lr=0.0058` — the cleaner feature set unlocked a slow-build basin the 61-feature config couldn't find. Saved as `models/xgb_v1_stability_pruned.json`.
+- [x] retrain on the 44-feature set with insiders (50-trial sweep) and re-run backtest. **Result**: raw +21.0% CAGR / Sharpe 0.81 (Sharpe gap over SPY widens from +0.01 to +0.06); `best_iteration=13`, `lr=0.0051`. MaxDD widens -25.8% → -31.7% (Calmar 0.74 → 0.66 — slight tail-risk regression, clear Sharpe win). All 4 insider features earn non-zero importance. Saved as `models/xgb_v1.json`.
+- [x] make today.py read from features.parquet instead of panel.parquet — `panel.parquet` drops the most recent ~21 trading days because forward returns aren't yet realised, but those are exactly the rows today.py needs to score live. New `load_features()` helper in `scripts/features.py`.
 - [ ] system: ensemble of 5 boosters with different seeds — average predictions (free, ~½ day, +5–15% Sharpe)
 - [ ] re-run null test on the clean-architecture model (current null-test table is stale)
 - [ ] data: swap yfinance → Sharadar (or equivalent) for delisted-ticker coverage — do before going live
-- [ ] Make today.py read from features instead of from panel
+- [ ] follow-up stability-selection prune now that 4 new features have landed — `excess_ret_5d`, `atr_pct`, `earnings_yield`, `roa_rank` were dead in this single run, but a 5-seed sweep is needed before pruning
 
 Paste this to claude to ask
 claude --resume b63b90f4-923f-419f-b30e-00cd9006952f
