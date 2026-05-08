@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Orchestrate the daily (or full) pipeline.
 
+Universe (S&P 500 membership) is refreshed on every run — the upstream
+github.com/fja05680/sp500 CSV is hand-maintained, so we re-pull Wikipedia
+on each invocation to keep the synthetic "today" snapshot in
+sp500_history.parquet aligned with the live roster. ~1s extra per run.
+
 Modes:
-    (default)         data → features → labels → today  (daily refresh + picks)
-    --retrain         data → features → labels → train → backtest → today
-    --full            universe → data → features → labels → train → backtest → today
-    --download-only   data → earnings → insider → fundamentals  (refresh caches only)
+    (default)         universe → data → earnings/insider/fundamentals → features → labels → today
+    --retrain         (default) + train + backtest
+    --full            alias for --retrain (retained for back-compat)
+    --download-only   universe → data → earnings → insider → fundamentals (refresh caches only)
 
 Other knobs:
     --no-diff       Skip --diff for today.py (don't auto-pick a prior file)
@@ -96,7 +101,7 @@ def main() -> int:
     ap.add_argument(
         "--full",
         action="store_true",
-        help="Also refresh the universe (implies --retrain).",
+        help="Alias for --retrain (universe is now refreshed on every run).",
     )
     ap.add_argument(
         "--no-diff",
@@ -127,8 +132,12 @@ def main() -> int:
     py = ["uv", "run", "python"]
     steps: list[tuple[str, list[str]]] = []
 
-    if args.full:
-        steps.append(("Refresh S&P 500 universe", py + ["scripts/universe.py"]))
+    # Universe always runs first: re-pulls Wikipedia (~1s) so that the
+    # synthetic "today" snapshot in sp500_history.parquet is always today's
+    # roster, not last week's. This is what keeps live picks correct after
+    # S&P committee adds/removes a name without us having re-pulled the
+    # github.com/fja05680/sp500 CSV.
+    steps.append(("Refresh S&P 500 universe", py + ["scripts/universe.py", "--refresh"]))
 
     steps.append(("Incremental data refresh (yfinance)", py + ["scripts/data.py"]))
     steps.append(("Refresh EDGAR earnings calendar", py + ["scripts/earnings.py"]))

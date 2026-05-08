@@ -161,10 +161,10 @@ uv run python scripts/today.py                                   # latest-date p
 uv run python scripts/today.py --diff picks/picks_YYYY-MM-DD.csv # buy/sell list vs that prior file
 uv run python scripts/today.py --no-overlay                      # ignore regime gate (diagnostic)
 
-uv run python scripts/run_all.py                  # daily: data → features → labels → today (auto --diff)
+uv run python scripts/run_all.py                  # daily: universe → data → earnings → insider → fundamentals → features → labels → today (auto --diff)
 uv run python scripts/run_all.py --retrain        # also: train + backtest
-uv run python scripts/run_all.py --full           # also: refresh universe first
-uv run python scripts/run_all.py --download-only  # just refresh raw data caches; no features/labels/train/today
+uv run python scripts/run_all.py --full           # alias for --retrain (universe refreshes on every run)
+uv run python scripts/run_all.py --download-only  # 🚨 CATCH-UP COMMAND — refresh raw data caches only (no features/labels/train/today). Run this first when you come back after time away.
 uv run python scripts/run_all.py --dry-run        # print plan, don't execute
 ```
 
@@ -174,6 +174,30 @@ uv run python scripts/run_all.py --dry-run        # print plan, don't execute
 backtest deliberately ignores the most recent ~21 trading days because they
 have no forward-return label yet; `today.py` deliberately predicts on them.
 
+> ## 🚨 Coming back after time away? Run this first 🚨
+>
+> ```bash
+> uv run python scripts/run_all.py --download-only
+> ```
+>
+> **This is the catch-up command.** It refreshes every raw data cache
+> (universe → prices → earnings → insider → fundamentals) and stops there —
+> no features, no training, no picks. Use this when you've been away for a
+> week, a month, a year. Every step is incremental and fail-safe:
+>
+> - **Universe** — re-pulls Wikipedia, syncs today's S&P 500 roster (catches
+>   any committee adds/removes you missed)
+> - **Prices** — yfinance incremental from the last cached bar
+> - **Earnings** — EDGAR submissions API, only new 10-Q/10-K filings since last run
+> - **Insider** — smart-incremental: any quarterly Form 3/4/5 zips published
+>   while you were away get downloaded, plus the latest is always re-fetched.
+>   Skip a year of runs and it still catches up cleanly
+> - **Fundamentals** — EDGAR XBRL incremental, only new filings
+>
+> Once the caches are healthy, run `run_all.py` (use existing model) or
+> `run_all.py --retrain` (refold the new data into a fresh model) to actually
+> generate picks.
+
 The orchestrator `scripts/run_all.py` chains the daily pipeline together:
 
 ```bash
@@ -181,31 +205,29 @@ The orchestrator `scripts/run_all.py` chains the daily pipeline together:
 uv run python scripts/run_all.py
 ```
 
-That runs `data.py → features.py → labels.py → today.py` end-to-end, stops
-on the first failure, and auto-supplies `--diff` to `today.py` using the
-most recent prior file in `picks/`. Exit code is the failed step's exit
-code, so it's cron-friendly.
+That runs `universe → data → earnings → insider → fundamentals → features →
+labels → today` end-to-end, stops on the first failure, and auto-supplies
+`--diff` to `today.py` using the most recent prior file in `picks/`. Exit
+code is the failed step's exit code, so it's cron-friendly. Universe is
+refreshed on every run (~1s — re-pulls Wikipedia so today's S&P 500 roster
+is current even if the upstream `SP_500_Historical_Component.csv` is stale).
 
 Modes:
 
-| Command                       | What runs                                                                |
-| ----------------------------- | ------------------------------------------------------------------------ |
-| `run_all.py`                  | data → features → labels → today (default daily)                         |
-| `run_all.py --retrain`        | also train + backtest                                                    |
-| `run_all.py --full`           | also refresh universe first (`--retrain` implied)                        |
-| `run_all.py --download-only`  | refresh raw data caches only (data/earnings/insider/fundamentals); stop  |
-| `run_all.py --no-today`       | refresh + optional retrain only, skip live picks                         |
-| `run_all.py --no-diff`        | run today.py without `--diff`                                            |
-| `run_all.py --dry-run`        | print the plan, don't execute                                            |
-
-Use `--download-only` when you have a model you're happy with and just want
-to keep the raw caches fresh between runs (e.g. before stepping away — let
-the bulk insider zip and EDGAR submissions catch up, score later). Combine
-with `--full` to also refresh universe membership.
+| Command                       | What runs                                                                                |
+| ----------------------------- | ---------------------------------------------------------------------------------------- |
+| `run_all.py`                  | universe → data → earnings → insider → fundamentals → features → labels → today (daily) |
+| `run_all.py --retrain`        | (default) + train + backtest                                                             |
+| `run_all.py --full`           | alias for `--retrain` (universe is now refreshed on every run, so the flag is redundant) |
+| **`run_all.py --download-only`**  | **🚨 catch-up command — refresh raw data caches only, then stop. See callout above.** |
+| `run_all.py --no-today`       | refresh + optional retrain only, skip live picks                                         |
+| `run_all.py --no-diff`        | run today.py without `--diff`                                                            |
+| `run_all.py --dry-run`        | print the plan, don't execute                                                            |
 
 Equivalent manual sequence (if you want to run pieces individually):
 
 ```bash
+uv run python scripts/universe.py --refresh
 uv run python scripts/data.py
 uv run python scripts/earnings.py
 uv run python scripts/insider.py

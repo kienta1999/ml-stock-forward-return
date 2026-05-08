@@ -5,10 +5,16 @@ Sources
 -------
 1. **Membership history** — `data/universe/SP_500_Historical_Component.csv`
    from github.com/fja05680/sp500. One row per change-event date with the full
-   members list as of that date. Going back to 1996.
+   members list as of that date. Going back to 1996. Updated by hand on each
+   download — `load_history` papers over staleness by appending a synthetic
+   "today" snapshot from the Wikipedia roster (see #2) so live picks always
+   reflect the current member list even if this CSV has not been re-pulled
+   recently.
 
 2. **Current sectors** — Wikipedia scrape, only available for present-day
    members. Tickers that have since left the index get `gics_sector = Unknown`.
+   The same scrape is reused as the "today" snapshot appended to the
+   membership history above.
 
 Caches
 ------
@@ -86,22 +92,90 @@ def _build_history_from_raw() -> pd.DataFrame:
     )
 
 
-def load_history(rebuild: bool = False) -> pd.DataFrame:
-    """Long-format (date, ticker) snapshots. Rebuilt from CSV when stale."""
-    os.makedirs(_UDIR, exist_ok=True)
-    if (
-        not rebuild
-        and os.path.exists(HISTORY_FILE)
-        and os.path.getmtime(HISTORY_FILE) >= os.path.getmtime(HISTORY_RAW)
-    ):
-        return pd.read_parquet(HISTORY_FILE)
+def _wikipedia_today_snapshot() -> pd.DataFrame | None:
+    """Current S&P 500 members framed as a one-row-per-ticker snapshot dated
+    today. Used to extend the fja05680/sp500 history forward when that CSV
+    has not been re-downloaded recently — without this, `members_on(today)`
+    silently returns the most recent CSV snapshot (which can be weeks stale).
 
-    df = _build_history_from_raw()
+    Reuses the weekly-cached Wikipedia sectors file (`load_sectors`) — no
+    extra HTTP fetch on most calls. Returns None on fetch failure so callers
+    can fall back to the CSV alone instead of crashing.
+    """
+    try:
+        sectors = load_sectors()
+    except Exception as e:
+        print(f"  ⚠ Wikipedia roster unavailable, skipping today snapshot: {e}", flush=True)
+        return None
+    if sectors is None or sectors.empty:
+        return None
+    today = pd.Timestamp.today().normalize()
+    tickers = [_normalize_ticker(t) for t in sectors["Ticker"]]
+    return pd.DataFrame({"date": today, "ticker": tickers})
+
+
+def _max_csv_date() -> pd.Timestamp:
+    """Latest change-event date in the upstream CSV. Used to decide whether
+    a Wikipedia snapshot for `today` would overlap with the CSV's authoritative
+    range (in which case the CSV wins) or extend it (in which case we append)."""
+    return pd.to_datetime(pd.read_csv(HISTORY_RAW, usecols=["date"])["date"]).max()
+
+
+def load_history(rebuild: bool = False) -> pd.DataFrame:
+    """Long-format (date, ticker) snapshots.
+
+    Composition:
+    1. **CSV change-events** — parsed from the fja05680/sp500 CSV. Authoritative
+       for any date ≤ the CSV's latest entry.
+    2. **Synthetic Wikipedia snapshots** — one row per unique date the script
+       has been run on past the CSV's last entry. These accumulate across runs
+       so historical lookups in the gap window (e.g. `members_on(2026-08-15)`
+       after running today and again in October) return the snapshot closest
+       to the lookup date, not the CSV's stale Jan-14 row.
+
+    Cache strategy:
+    - When the upstream CSV is replaced (mtime advances) or `rebuild=True`,
+      everything is rebuilt from CSV — past synthetic snapshots are dropped
+      because the new CSV may now have authoritative change-events covering
+      that period.
+    - Otherwise we load the existing parquet (which already includes past
+      synthetic snapshots from prior runs) and idempotently add/refresh
+      today's synthetic.
+    """
+    os.makedirs(_UDIR, exist_ok=True)
+
+    csv_changed = (
+        not os.path.exists(HISTORY_FILE)
+        or os.path.getmtime(HISTORY_FILE) < os.path.getmtime(HISTORY_RAW)
+    )
+
+    if rebuild or csv_changed:
+        df = _build_history_from_raw()
+    else:
+        df = pd.read_parquet(HISTORY_FILE)
+
+    max_csv_date = _max_csv_date()
+
+    # Add today's Wikipedia snapshot. CSV is authoritative inside its range,
+    # so we only synthesize for dates strictly past the CSV's last entry.
+    # If today's synthetic already exists from an earlier run today, it gets
+    # replaced (Wikipedia may have been edited since).
+    today_snap = _wikipedia_today_snapshot()
+    if today_snap is not None and not today_snap.empty:
+        today_date = pd.Timestamp(today_snap["date"].iloc[0])
+        if today_date > max_csv_date:
+            df = df[df["date"] != today_date]
+            df = pd.concat([df, today_snap], ignore_index=True)
+            df = df.sort_values(["date", "ticker"]).reset_index(drop=True)
+
     df.to_parquet(HISTORY_FILE)
+
+    n_synthetic = df.loc[df["date"] > max_csv_date, "date"].nunique()
     print(
-        f"Built membership history: {df['date'].nunique()} change-event dates, "
-        f"{df['ticker'].nunique()} unique tickers ({df['date'].min().date()} → "
-        f"{df['date'].max().date()}).",
+        f"Membership history: {df['date'].nunique()} snapshot dates "
+        f"({df['date'].nunique() - n_synthetic} from CSV + {n_synthetic} synthetic), "
+        f"{df['ticker'].nunique()} unique tickers "
+        f"({df['date'].min().date()} → {df['date'].max().date()}).",
         flush=True,
     )
     return df
@@ -268,10 +342,15 @@ def main() -> None:
     force_sectors = "--refresh" in sys.argv
     rebuild_history = "--rebuild-history" in sys.argv
 
+    # Sectors first: --refresh re-pulls Wikipedia and bumps SECTORS_FILE mtime,
+    # which is one of the inputs load_history uses to decide whether to rebuild.
+    # If we built history before refreshing sectors, the rebuild check would see
+    # the *old* sectors mtime and skip — the synthetic "today" snapshot would
+    # only update on the *next* run, which is confusing.
+    sectors = load_sectors(force_refresh=force_sectors)
     history = load_history(rebuild=rebuild_history)
     _summarize_history(history)
 
-    sectors = load_sectors(force_refresh=force_sectors)
     print(f"\nSector tags: {len(sectors)} tickers (current Wikipedia roster).")
     print(sectors["GICS Sector"].value_counts().to_string())
 
