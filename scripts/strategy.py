@@ -26,7 +26,7 @@ from dataset import FEATURE_COLS  # noqa: E402
 from features import CATEGORICAL_FEATURES, NULLABLE_FEATURES  # noqa: E402
 
 # Default knobs (override at the call site if needed).
-TOP_N = 50
+TOP_N = 40
 HOLD_DAYS = 21
 COST_PER_SIDE = 0.0005   # 5 bps
 VIX_THRESHOLD = 25.0

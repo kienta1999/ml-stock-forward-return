@@ -147,9 +147,9 @@ uv run python scripts/train.py --quick --seed 3     # vary RNG (XGBoost + optuna
 
 uv run python scripts/backtest.py                    # long-only + gated, 21 shifted starts (~1 min)
 uv run python scripts/backtest.py --no-overlay       # skip gated variant
-uv run python scripts/backtest.py --top-n 25         # tighter pick (default 50)
+uv run python scripts/backtest.py --top-n 25         # tighter pick (default 40)
 
-uv run python scripts/today.py                                   # latest-date picks (regime gate + top 50)
+uv run python scripts/today.py                                   # latest-date picks (regime gate + top 40)
 uv run python scripts/today.py --diff picks/picks_YYYY-MM-DD.csv # buy/sell list vs that prior file
 uv run python scripts/today.py --no-overlay                      # ignore regime gate (diagnostic)
 
@@ -472,14 +472,15 @@ exceed the pre-clip result.
 
 ### Strategy (v1, long-only)
 
-Top-50 by predicted return (= top 10% of ~500 active S&P 500 names),
+Top-40 by predicted return (= top ~8% of ~500 active S&P 500 names),
 equal-weighted, monthly rebalance, 21 trading day hold, 5 bps per side cost.
 Two variants run side-by-side:
 
-- **Gated** (recommended): `if SPY_close > SPY_SMA200 AND VIX_close < 25 → top 50; else cash.`
-  Trend-up + low-vol regime filter. ~77% time in market.
-- **Raw**: always long top 50. Diagnostic — what the model picks alone, no
-  market-timing overlay.
+- **Raw** (default): always long top 40. The deployed strategy — see
+  "Why default top-40, raw" below for the rationale.
+- **Gated**: `if SPY_close > SPY_SMA200 AND VIX_close < 25 → top 40; else cash.`
+  Trend-up + low-vol regime filter, ~77% time in market. Kept as diagnostic
+  and as a fallback if you want to give up CAGR for shallower drawdowns.
 
 ### Rebalance-date sensitivity
 
@@ -517,6 +518,33 @@ came from the **5-seed stability-selection prune** (61 → 40
 features) — the cleaner panel let optuna find a slow-build basin
 (`best_iteration=43, lr=0.0058`) that it couldn't with 21 noise
 columns.
+
+### Why default top-40, raw (no gate)
+
+A `--top-n 40..60` sweep on both the 2021-2026 test window and the
+2007-2026 full history was the basis for the default choice.
+
+**Within the raw variant, n=40 dominates.** It posts the best CAGR in
+both windows (+24.05% full, +20.78% recent), best/tied Sharpe (0.76 full,
+0.78 recent), and the MaxDD actually gets _deeper_ as n grows — adding
+names dilutes signal without reducing crisis beta.
+
+**Raw beats gated on Sharpe across the whole sweep** (raw 0.76–0.78 vs
+gated 0.65–0.75). The regime gate gives up roughly half the CAGR
+(24% → 10%) for less Sharpe — bad insurance.
+
+**The 2008 MaxDD argument doesn't hold up.** Raw n=40's full-history
+drawdown is -56.21%; SPY buy-and-hold over the same window is -55.19%.
+The gate was protecting against a drawdown SPY itself doesn't avoid.
+You'd need to gate SPY too to be consistent.
+
+**Risk acknowledgement.** Raw means full market beta in a 2008-style
+crisis. The thesis is that 401k flows + institutional algo liquidity
+have raised the floor vs 2007 — a "this-time-is-different" bet, which
+is historically dangerous. Partial mitigation: keep a manual kill switch
+(go to cash if SPY breaks SMA200 _and_ VIX > 30) rather than encoding
+that logic into the strategy. Human judgment for the 1-in-15-year tail,
+not a permanent half-CAGR tax.
 
 **Concentration sweep on the same model** (`backtest.py --top-n 20`):
 top-20 raw +20.3% / Sharpe 0.67. Concentration trades return for vol;
