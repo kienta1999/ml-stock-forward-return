@@ -9,12 +9,13 @@ top-N tickers (or "CASH").
 Daily workflow:
     uv run python scripts/data.py        # incremental refresh
     uv run python scripts/features.py    # rebuild features
-    uv run python scripts/labels.py      # rebuild panel.parquet
     uv run python scripts/today.py       # generate today's picks
 
-The most recent ~21 trading days have features but no label (forward_21d_return
-needs prices 21 days ahead, which don't exist yet). The backtest deliberately
-ignores those days; this script deliberately predicts on them.
+This script reads `features.parquet` directly (not `panel.parquet`). The
+panel drops the most recent ~21 trading days because forward_21d_return
+needs prices 21 days ahead — but those rows still have valid *features*
+and are exactly the ones we need to score live. Reading features.parquet
+also means `labels.py` does not need to be re-run for today's picks.
 
 CLI:
     uv run python scripts/today.py
@@ -42,7 +43,7 @@ if _HERE not in sys.path:
 
 import strategy  # noqa: E402
 from data import load_market  # noqa: E402
-from dataset import load_panel  # noqa: E402
+from features import load_features  # noqa: E402
 
 _ROOT = os.path.dirname(_HERE)
 MODEL_PATH = os.path.join(_ROOT, "models", "xgb_v1.json")
@@ -57,10 +58,10 @@ STALE_DAYS_WARN = 7
 
 
 def predict_today(
-    panel: pd.DataFrame, model_path: str
+    features: pd.DataFrame, model_path: str
 ) -> tuple[pd.DataFrame, pd.Timestamp]:
-    """Score the latest-date stocks. Returns (today_panel, latest_date)."""
-    valid = strategy.filter_valid_features(panel)
+    """Score the latest-date stocks. Returns (today_features, latest_date)."""
+    valid = strategy.filter_valid_features(features)
     latest = valid["date"].max()
     today = valid[valid["date"] == latest]
     today = strategy.predict(today, strategy.load_model(model_path))
@@ -141,9 +142,9 @@ def main() -> None:
         else:
             print(f"  ⚠ --diff file {args.diff} does not exist; will skip diff")
 
-    print("Loading panel and predicting today's slice...")
-    panel = load_panel(drop_na=False)
-    today, latest_date = predict_today(panel, args.model)
+    print("Loading features and predicting today's slice...")
+    features = load_features()
+    today, latest_date = predict_today(features, args.model)
     today_str = latest_date.date()
 
     print(f"  Latest date with valid features: {today_str}")
@@ -151,8 +152,8 @@ def main() -> None:
     days_old = (pd.Timestamp.today().normalize() - latest_date).days
     if days_old > STALE_DAYS_WARN:
         print(
-            f"  ⚠ panel is {days_old} days old — "
-            f"run data.py + features.py + labels.py to refresh"
+            f"  ⚠ features are {days_old} days old — "
+            f"run data.py + features.py to refresh"
         )
 
     market_data = load_market()

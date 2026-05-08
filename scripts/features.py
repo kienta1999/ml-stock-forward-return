@@ -758,6 +758,21 @@ def build_panel(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def load_features(path: str = PANEL_PATH) -> pd.DataFrame:
+    """Read the unlabelled feature panel for live scoring.
+
+    `data/processed/panel.parquet` (built by labels.py) drops the most recent
+    ~21 trading days because their forward_21d_return is not yet known.
+    today.py needs to score those rows — they have valid features, just no
+    realised label — so it loads features.parquet directly via this helper.
+    """
+    if not os.path.exists(path):
+        raise SystemExit(f"{path} not found. Run scripts/features.py first.")
+    panel = pd.read_parquet(path)
+    panel["date"] = pd.to_datetime(panel["date"])
+    return panel
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--ticker", help="Compute features for a single ticker (smoke test)")
