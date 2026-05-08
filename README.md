@@ -4,21 +4,21 @@ ML-based S&P 500 stock ranker. Predict each stock's forward 21-trading-day
 return independently with XGBoost, sort to get a daily ranking, long the top
 decile, hold 21 trading days, rebalance monthly with a SPY/VIX regime gate.
 
-**Current status (+ Form 4 insider transactions, 50-trial sweep on
-44 features):** raw long-only **+21.0% CAGR / Sharpe 0.81 vs SPY
+**Current status (+ Form 4 insider transactions, 500-trial sweep on
+44 features):** raw long-only **+21.9% CAGR / Sharpe 0.86 vs SPY
 +12.7% / Sharpe 0.75** (test 2021-01-04 → 2026-03-31). **Sharpe gap
-over SPY widens from +0.01 to +0.06** — strategy delivers +8.2 CAGR
-pts over SPY at 1.53× SPY vol / 1.65× SPY return. Final NAV **2.70×**
-vs SPY 1.87× = **+44% more wealth** over 5.25 years. All 4 new insider
+over SPY widens from +0.01 to +0.11** — strategy delivers +9.1 CAGR
+pts over SPY at 1.49× SPY vol / 1.72× SPY return. Final NAV **2.81×**
+vs SPY 1.87× = **+50% more wealth** over 5.25 years. All 4 new insider
 features earn non-zero importance (officer open-market `insider_buy_count_60d`
 strongest at rank 25/45, sells weakest at 39/45 — matches the
-literature on 10b5-1-plan noise). MaxDD widens -25.8% → -31.7%, the
-expected cost of the higher CAGR (Calmar 0.74 → 0.66 — slight
-regression on tail risk, clear win on Sharpe).
-`best_iteration=13` with `learning_rate=0.0051`
-(prior runs were stuck at 2-10) — the cleaner feature set unlocked a
-deeper, more conservative basin that the 61-feature config couldn't
-find.
+literature on 10b5-1-plan noise). MaxDD also tightens -31.7% → -27.8%
+vs the 50-trial run (Calmar recovers 0.66 → 0.79 — clear win on tail
+risk too). `best_iteration=35` with `learning_rate=0.0054` (50-trial
+run stopped at 13) — 10× more trials drove the model into the same
+hyperparam neighborhood with more boosting rounds before val plateaus.
+The marginal Sharpe gain (+0.05) is real but small: most of the lift
+is variance reduction, not optuna finding a new region.
 
 The lift came from the **5-seed stability-selection prune**: hold
 hyperparams fixed at `DEFAULT_PARAMS`, vary only `random_state ∈
@@ -565,7 +565,7 @@ mean equity curve plus the 10th/90th percentile band. Closely matches what
 21 overlapping sleeves would deliver, with much less code complexity.
 Sleeves are on the roadmap; this is the simpler-but-equivalent v1.
 
-### Results (test 2021-01-04 → 2026-03-31, 50-trial sweep on 44 features incl. Form 4 insiders, demeaned labels)
+### Results (test 2021-01-04 → 2026-03-31, 500-trial sweep on 44 features incl. Form 4 insiders, demeaned labels)
 
 `backtest.py` clips the SPY benchmark to the strategy's last predictable
 date so the headline comparison is apples-to-apples by default; the CSV
@@ -576,23 +576,26 @@ inspection.
 
 | Variant                              | CAGR       | Vol   | Sharpe    | Max DD | Final NAV | Time-in-market |
 | ------------------------------------ | ---------- | ----- | --------- | ------ | --------- | -------------- |
-| **Raw long-only**                    | **+21.0%** | 25.9% | **+0.81** | -31.7% | **2.70×** | 100%           |
-| Gated long-only                      | +12.0%     | 17.7% | +0.68     | -24.5% | 1.80×     | 77%            |
+| **Raw long-only**                    | **+21.9%** | 25.3% | **+0.86** | -27.8% | **2.81×** | 100%           |
+| Gated long-only                      | +12.5%     | 17.2% | +0.73     | -21.6% | 1.85×     | 77%            |
 | SPY buy & hold (clipped @2026-03-31) | +12.7%     | 17.0% | +0.75     | -24.5% | 1.87×     | —              |
 
-**Reading the table honestly:** raw beats SPY by +8.2 CAGR points and
-**the Sharpe gap over SPY widens from +0.01 to +0.06** (0.81 vs 0.75).
-Strategy runs at 1.53× SPY's vol but earns 1.65× SPY's return —
-risk-efficiency keeps improving over the benchmark. Final NAV 2.70 vs
-1.87 = **+44% more wealth** over 5.25 years. The cost of the higher
-CAGR is a deeper drawdown (-25.8% → -31.7%); Calmar dips 0.74 → 0.66.
-Sharpe is the metric we've been tracking, so this is a clear forward
-step on the headline yardstick. Gated still trails SPY (regime gate
-gives up upside it doesn't earn back; redundant when SPY/VIX features
-are already inside the model). The lift over the prior 40-feature
-stability-pruned run (+19.0% / 0.76) came from adding the 4 insider
-features — all 4 earned non-zero importance, with `insider_buy_count_60d`
-strongest at rank 25/45.
+**Reading the table honestly:** raw beats SPY by +9.1 CAGR points and
+**the Sharpe gap over SPY widens from +0.01 to +0.11** (0.86 vs 0.75).
+Strategy runs at 1.49× SPY's vol but earns 1.72× SPY's return —
+risk-efficiency keeps improving over the benchmark. Final NAV 2.81 vs
+1.87 = **+50% more wealth** over 5.25 years. The 500-trial sweep also
+tightened the drawdown (-31.7% → -27.8% vs the 50-trial run), so
+Calmar recovers 0.66 → 0.79. Gated is now within noise of SPY (12.5%
+vs 12.7%; the regime gate gives up upside the model already prices via
+SPY/VIX features). The lift over the 50-trial insider run
+(+21.0% / 0.81) is mostly **variance reduction, not discovery**:
+optuna stayed in the same hyperparam neighborhood (lr 0.0051 → 0.0054,
+colsample 0.671 → 0.626) but `best_iteration` lifted 13 → 35, giving
+a more stable model. Val decile spread (the optuna objective) barely
+moved (+0.0181 → +0.0184). 5h21m of compute for ~7% Sharpe gain;
+diminishing returns are real and 100–150 trials likely captures most
+of it next time.
 
 ### Why default top-40, raw (no gate)
 
