@@ -924,11 +924,28 @@ for further alpha.
 > → ✅ **done**, +19.0% CAGR / Sharpe 0.76 (first time > SPY).
 > §3 Form 4 insider transactions → ✅ **done**, **+21.0% CAGR /
 > Sharpe 0.81** (Sharpe gap over SPY widens to +0.06).
-> Next up: **§5 ensemble of 5 seeds** (free, ~½ day, +5-15%
-> Sharpe, also a natural extension of the seed-sweep we just used for
-> pruning) → §6 paid delisted-ticker prices (do before going live —
-> ~3-5 CAGR pts of survivorship deflation expected). §1 short interest
-> deferred (FINRA archive only goes back to 2018).
+>
+> **Queued (free, in priority order):**
+> 1. **§7 8-K item 2.02 announcement dates** (~1 day) — replace 10-Q-anchored
+>    PEAD window with the actual earnings-announcement date. Literature says
+>    PEAD lives around the 8-K, not the 10-Q (~14d earlier). EDGAR-free, just
+>    one extra index request per filing. Highest-confidence lift on the queue.
+> 2. **§5 ensemble of 5 seeds** (~½ day) — average predictions across 5
+>    boosters with different RNG seeds. Documented +5-15% Sharpe. Reuses the
+>    seed-sweep tooling from the stability prune. Does after #1 so the
+>    ensemble averages over the new feature set.
+> 3. **§8 13F institutional ownership** (~1-2 days) — quarterly Schedule 13F
+>    via EDGAR bulk data (same shape as your insider pipeline). Smart-money
+>    flow tracking: top-N largest holders, holdings concentration, recent net
+>    fund buying. Cross-sectional fundamentals-style signal.
+> 4. **§9 FRED macro broadcast features** (~½ day) — yield curve slope (2y/10y),
+>    HY credit spreads, DXY dollar index. Free FRED API, regime context that
+>    interacts with cross-section. Risk: partly redundant with VIX/SPY already
+>    in the panel.
+>
+> §6 paid delisted-ticker prices (do before going live — ~3-5 CAGR pts of
+> survivorship deflation expected). §1 short interest deferred (FINRA archive
+> only goes back to 2018).
 
 ### 1. FINRA short interest — deferred
 
@@ -1225,6 +1242,8 @@ backtest.py reports summary stats; the interesting questions need slicing.
 - [x] retrain on the 44-feature set with insiders (50-trial sweep) and re-run backtest. **Result**: raw +21.0% CAGR / Sharpe 0.81 (Sharpe gap over SPY widens from +0.01 to +0.06); `best_iteration=13`, `lr=0.0051`. MaxDD widens -25.8% → -31.7% (Calmar 0.74 → 0.66 — slight tail-risk regression, clear Sharpe win). All 4 insider features earn non-zero importance. Saved as `models/xgb_v1.json`.
 - [x] make today.py read from features.parquet instead of panel.parquet — `panel.parquet` drops the most recent ~21 trading days because forward returns aren't yet realised, but those are exactly the rows today.py needs to score live. New `load_features()` helper in `scripts/features.py`.
 - [ ] system: ensemble of 5 boosters with different seeds — average predictions (free, ~½ day, +5–15% Sharpe)
+- [ ] feature: 13F institutional ownership from SEC EDGAR (~1-2 days) — quarterly Schedule 13F filings via EDGAR bulk data, same shape as insider pipeline. Candidate features: top-N largest holder count, ownership concentration (HHI on holdings), net fund buying in last quarter. Smart-money flow signal.
+- [ ] feature: FRED macro broadcast (~½ day) — yield curve slope (2y/10y), HY credit spreads, DXY dollar index via free FRED API. Broadcast regime context that interacts with cross-section. Worth checking against VIX/SPY redundancy in importance scores.
 - [ ] re-run null test on the clean-architecture model (current null-test table is stale)
 - [ ] data: swap yfinance → Sharadar (or equivalent) for delisted-ticker coverage — do before going live
 - [ ] follow-up stability-selection prune now that 4 new features have landed — `excess_ret_5d`, `atr_pct`, `earnings_yield`, `roa_rank` were dead in this single run, but a 5-seed sweep is needed before pruning
