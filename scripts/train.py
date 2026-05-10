@@ -42,16 +42,17 @@ REPORTS_DIR = os.path.join(_ROOT, "reports")
 DEFAULT_TRIALS = 50
 EARLY_STOPPING_ROUNDS = 100
 
-# Defaults for --quick: best params from the 200-trial sweep
-# (val decile spread +0.0297, val IC +0.0554). Reproducible without tuning.
+# Defaults for --quick: last known-good params (recovered from git history).
+# Slow-build basin: lr~0.005, best_iteration=35, val IC +0.0438, val decile
+# spread +0.0184. Reproducible without tuning.
 DEFAULT_PARAMS: dict = {
-    "max_depth": 3,
-    "learning_rate": 0.0822,
-    "n_estimators": 860,
-    "min_child_weight": 11,
-    "subsample": 0.9487,
-    "colsample_bytree": 0.6285,
-    "reg_lambda": 0.4457,
+    "max_depth": 4,
+    "learning_rate": 0.0054278085830524415,
+    "n_estimators": 717,
+    "min_child_weight": 5,
+    "subsample": 0.9122178209065154,
+    "colsample_bytree": 0.6264159684699684,
+    "reg_lambda": 0.010035725425724723,
 }
 
 
@@ -197,12 +198,26 @@ def _objective(
         # Rank-normalized fundamentals introduce sector × value interactions
         # that may justify depth 4-5; depth-3 still wins so far.
         "max_depth": trial.suggest_int("max_depth", 3, 5),
-        "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.3, log=True),
+        # learning_rate: tightened from [0.005, 0.3] to [0.001, 0.02] (log).
+        # The slow-build basin (lr~0.005, best_iteration in the 13-43 range)
+        # has consistently outperformed the aggressive-shallow basin
+        # (lr~0.03+, best_iteration ~5) — TPE was burning trials on the latter
+        # at 50-trial budgets, posting val spread ~0.0175 vs the ~0.0235
+        # achievable in the slow basin. Capping at 0.02 forces optuna there.
+        "learning_rate": trial.suggest_float("learning_rate", 0.001, 0.02, log=True),
         "n_estimators": trial.suggest_int("n_estimators", 200, 1000),
         "min_child_weight": trial.suggest_int("min_child_weight", 1, 20),
         "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-        "reg_lambda": trial.suggest_float("reg_lambda", 0.01, 10.0, log=True),
+        # colsample_bytree: tightened from [0.6, 1.0] to [0.55, 0.75].
+        # Project memory: 0.629 was identified as the actual lever that
+        # unlocked cross-sectional signal; values >0.8 give every tree
+        # almost-all features and collapse decile spread. Window stays
+        # asymmetric around the known-good point so optuna can still wander.
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.55, 0.75),
+        # reg_lambda: floor lowered from 0.01 to 0.001 (log). The saved
+        # known-good params hit 0.01003 — bumping the prior wall — so the
+        # true optimum likely lives below 0.01. Ceiling kept at 10.0.
+        "reg_lambda": trial.suggest_float("reg_lambda", 0.001, 10.0, log=True),
     }
     model = _make_model(params, dates_val, seed=seed)
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)

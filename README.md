@@ -161,10 +161,10 @@ uv run python scripts/today.py                                   # latest-date p
 uv run python scripts/today.py --diff picks/picks_YYYY-MM-DD.csv # buy/sell list vs that prior file
 uv run python scripts/today.py --no-overlay                      # ignore regime gate (diagnostic)
 
-uv run python scripts/run_all.py                  # daily: universe → data → earnings → insider → fundamentals → features → labels → today (auto --diff)
-uv run python scripts/run_all.py --retrain        # also: train + backtest
+uv run python scripts/run_all.py                  # 🚨 DAILY / CATCH-UP — universe → data → earnings → insider → fundamentals → features → labels → today (auto --diff). Run this when you come back after time away.
+uv run python scripts/run_all.py --retrain        # also: train + backtest (use after a feature change)
 uv run python scripts/run_all.py --full           # alias for --retrain (universe refreshes on every run)
-uv run python scripts/run_all.py --download-only  # 🚨 CATCH-UP COMMAND — refresh raw data caches only (no features/labels/train/today). Run this first when you come back after time away.
+uv run python scripts/run_all.py --download-only  # raw-data refresh only — useful if you want to defer features/labels/picks
 uv run python scripts/run_all.py --dry-run        # print plan, don't execute
 ```
 
@@ -177,26 +177,36 @@ have no forward-return label yet; `today.py` deliberately predicts on them.
 > ## 🚨 Coming back after time away? Run this first 🚨
 >
 > ```bash
-> uv run python scripts/run_all.py --download-only
+> uv run python scripts/run_all.py
 > ```
 >
 > **This is the catch-up command.** It refreshes every raw data cache
-> (universe → prices → earnings → insider → fundamentals) and stops there —
-> no features, no training, no picks. Use this when you've been away for a
-> week, a month, a year. Every step is incremental and fail-safe:
+> (universe → prices → earnings → insider → fundamentals), rebuilds the
+> features and labels panels against the new data, and generates today's
+> picks against your **existing** model — no retrain. Use this when you've
+> been away for a day, a week, a month, a year. Every step is incremental
+> and fail-safe:
 >
 > - **Universe** — re-pulls Wikipedia, syncs today's S&P 500 roster (catches
 >   any committee adds/removes you missed)
 > - **Prices** — yfinance incremental from the last cached bar
-> - **Earnings** — EDGAR submissions API, only new 10-Q/10-K filings since last run
+> - **Earnings** — EDGAR submissions API, only new 8-K item 2.02 / 10-Q / 10-K filings
+>   since last run (cached parquets without the `items` column auto-refetch
+>   under the new schema)
 > - **Insider** — smart-incremental: any quarterly Form 3/4/5 zips published
 >   while you were away get downloaded, plus the latest is always re-fetched.
 >   Skip a year of runs and it still catches up cleanly
 > - **Fundamentals** — EDGAR XBRL incremental, only new filings
+> - **Features / labels** — pure local recompute against the freshened caches
+> - **Today** — scores against the existing `models/xgb_v1.json`, writes
+>   `picks/picks_<date>.csv`, auto-diffs against the most recent prior file
 >
-> Once the caches are healthy, run `run_all.py` (use existing model) or
-> `run_all.py --retrain` (refold the new data into a fresh model) to actually
-> generate picks.
+> Want a model that actually _learns_ on the new data (e.g. after a feature
+> change like the 8-K anchor switch)? Run `run_all.py --retrain` instead —
+> same catch-up flow, plus train + backtest at the end.
+>
+> Just want to pull caches now and finish later? `run_all.py --download-only`
+> stops after the raw-data refresh.
 
 The orchestrator `scripts/run_all.py` chains the daily pipeline together:
 
@@ -216,10 +226,10 @@ Modes:
 
 | Command                       | What runs                                                                                |
 | ----------------------------- | ---------------------------------------------------------------------------------------- |
-| `run_all.py`                  | universe → data → earnings → insider → fundamentals → features → labels → today (daily) |
+| **`run_all.py`**              | **🚨 daily / catch-up — universe → data → earnings → insider → fundamentals → features → labels → today. See callout above.** |
 | `run_all.py --retrain`        | (default) + train + backtest                                                             |
 | `run_all.py --full`           | alias for `--retrain` (universe is now refreshed on every run, so the flag is redundant) |
-| **`run_all.py --download-only`**  | **🚨 catch-up command — refresh raw data caches only, then stop. See callout above.** |
+| `run_all.py --download-only`  | refresh raw data caches only (universe → data → earnings → insider → fundamentals), then stop |
 | `run_all.py --no-today`       | refresh + optional retrain only, skip live picks                                         |
 | `run_all.py --no-diff`        | run today.py without `--diff`                                                            |
 | `run_all.py --dry-run`        | print the plan, don't execute                                                            |
@@ -341,21 +351,23 @@ Why: a 30% trailing return in 2008 ≠ a 30% return in 2017. Ranks normalise out
 
 | Feature                      | Definition                                                                                                      | What it captures                                                                                                                                                                                                                         |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `days_to_earnings`           | days from row date to next known earnings filing (EDGAR 10-Q/10-K + yfinance forward calendar), clipped [0, 90] | Pre-earnings positioning. **Currently 0.0 importance** — 10-Q dates are scheduled, not surprise-driven, so forward distance carries no cross-sectional signal. Kept for now pending a switch to actual 8-K item 2.02 announcement dates. |
-| `days_since_earnings`        | days since most recent earnings filing, clipped [0, 90]                                                         | **Post-earnings drift signal — 14th in feature importance (0.037 gain).** The continuous form lets XGBoost discover its own optimal drift window.                                                                                        |
-| `post_earnings_drift_window` | `1.0` if `days_since_earnings ∈ [1, 5]` else `0.0`                                                              | Hand-coded PEAD window flag. **Currently 0.0 importance** — XGBoost reconstructs the same split internally from the continuous `days_since_earnings`, making this redundant. Kept for now pending a full re-evaluation.                  |
+| `days_to_earnings`           | days from row date to next known earnings event (EDGAR 8-K item 2.02 + yfinance forward calendar), clipped [0, 90] | Pre-earnings positioning. **Previously 0.0 importance** under 10-Q anchoring — re-evaluation pending after the 8-K switch. |
+| `days_since_earnings`        | days since most recent earnings announcement (8-K item 2.02, falling back to 10-Q for older / pre-item-code filings), clipped [0, 90] | **Post-earnings drift signal — 14th in feature importance (0.037 gain) under the old 10-Q anchor.** The 8-K switch anchors PEAD on the actual market-moving event ~14 days earlier; retrain TBD. |
+| `post_earnings_drift_window` | `1.0` if `days_since_earnings ∈ [1, 5]` else `0.0`                                                              | Hand-coded PEAD window flag. **0.0 importance** — XGBoost reconstructs the same split internally from the continuous `days_since_earnings`. Already disabled in `EARNINGS_FEATURES`. |
 
-**Data source.** SEC EDGAR submissions API gives every 10-Q / 10-K
-filing date for tickers with a current CIK (648 of 959 historical
-S&P 500 names; the missing 311 are mostly delisted/renamed without
-retained CIKs). For live picks, yfinance's forward earnings calendar
-fills in the upcoming dates. Caveat: 10-Q filings trail the actual
-8-K item 2.02 announcement by ~2-4 weeks, so the "drift window" here
-is anchored on the report filing rather than the announcement.
-Switching to 8-K item filtering would require one extra request per
-filing and is queued under [Next steps](#next-steps).
+**Data source.** SEC EDGAR submissions API gives every filing
+(8-K / 10-Q / 10-K, plus amendments) for tickers with a current CIK
+(648 of 959 historical S&P 500 names; the missing 311 are mostly
+delisted/renamed without retained CIKs). The PEAD anchor is the
+**8-K item 2.02** filing — the earnings press release, filed within
+~4 business days of the event. The submissions JSON exposes a parallel
+`items` array, so we filter to item 2.02 with no extra requests beyond
+the per-ticker fetch we already do. Older filings (pre-2004, before
+8-K item codes were standardised) and rare gaps fall back to the
+matching 10-Q. For live picks, yfinance's forward earnings calendar
+fills in the upcoming dates.
 
-`scripts/earnings.py` handles the EDGAR 10-Q/10-K pipeline + yfinance
+`scripts/earnings.py` handles the EDGAR 8-K/10-Q/10-K pipeline + yfinance
 forward calendar (separate from `data.py` because the cadences and
 rate-limit contracts differ). `scripts/fundamentals.py` is the parallel
 pipeline for EDGAR XBRL fundamentals. `scripts/deprecated_short_interest.py`
@@ -929,22 +941,49 @@ for further alpha.
 > Sharpe 0.81** (Sharpe gap over SPY widens to +0.06).
 >
 > **Queued (free, in priority order):**
-> 1. **§7 8-K item 2.02 announcement dates** (~1 day) — replace 10-Q-anchored
->    PEAD window with the actual earnings-announcement date. Literature says
->    PEAD lives around the 8-K, not the 10-Q (~14d earlier). EDGAR-free, just
->    one extra index request per filing. Highest-confidence lift on the queue.
-> 2. **§5 ensemble of 5 seeds** (~½ day) — average predictions across 5
+> 1. **§7 8-K item 2.02 announcement dates** — ✅ **shipped** (data path).
+>    `earnings.py` now caches 8-K filings and filters to item 2.02 via the
+>    submissions JSON's parallel `items` array (zero extra requests vs the
+>    prior README plan). `load_earnings_dates` prefers 8-K announcement
+>    dates per quarter and falls back to 10-Q for pre-item-code filings.
+>    Retrain (`--quick` on saved DEFAULT_PARAMS) reproduces the prior raw
+>    +21.6% CAGR / 0.86 Sharpe baseline within stochastic noise — 8-K data
+>    is **neutral, not lift-positive on top-40 backtest**. The lift may
+>    only appear after the optuna objective is realigned with the strategy
+>    (see #2 below).
+> 2. **🔴 BLOCKER: optuna objective is anti-correlated with top-40 CAGR**
+>    (~½ day). A 350-trial sweep on the 8-K panel maximised val decile
+>    spread to 0.0183 (best ever) but backtested at +18.81% CAGR, while
+>    `--quick` with saved params hit val decile spread of only 0.0161 and
+>    backtested at **+21.60% CAGR**. Decile spread averages ranking
+>    quality across deciles 1 & 10 (~50 names each); the strategy holds
+>    only the top 40, the very tip of decile 1. Replace
+>    `_compute_decile_spread()` with a top-40-aligned metric (cumulative
+>    log return of an equal-weighted top-40 portfolio over val, or its
+>    Sharpe) before any further tuning. Until then, **`train.py --quick`
+>    is your best model — do not run optuna sweeps for tuning.**
+> 3. **§5 ensemble of 5 seeds** (~½ day) — average predictions across 5
 >    boosters with different RNG seeds. Documented +5-15% Sharpe. Reuses the
->    seed-sweep tooling from the stability prune. Does after #1 so the
->    ensemble averages over the new feature set.
-> 3. **§8 13F institutional ownership** (~1-2 days) — quarterly Schedule 13F
+>    seed-sweep tooling from the stability prune. Run after #2 lands so the
+>    ensemble averages over a model selected against the right objective.
+> 4. **§8 13F institutional ownership** (~1-2 days) — quarterly Schedule 13F
 >    via EDGAR bulk data (same shape as your insider pipeline). Smart-money
 >    flow tracking: top-N largest holders, holdings concentration, recent net
 >    fund buying. Cross-sectional fundamentals-style signal.
-> 4. **§9 FRED macro broadcast features** (~½ day) — yield curve slope (2y/10y),
->    HY credit spreads, DXY dollar index. Free FRED API, regime context that
->    interacts with cross-section. Risk: partly redundant with VIX/SPY already
->    in the panel.
+> 5. **§9 FRED macro broadcast features** (~½ day) — yield curve slope
+>    (`T10Y3M`, 1982+) and HY OAS (`BAMLH0A0HYM2`, 1996+). Both have full
+>    2007 floor coverage. Free FRED API, broadcast-into-interaction pattern
+>    same as `vix_level` / `spy_rsi_14`.
+> 6. **§10 Amihud illiquidity** (~1 hour) — rolling 21d mean of
+>    `|daily_return| / dollar_volume`, plus its cross-sectional rank. No new
+>    data download (computed from existing OHLCV); full 2007+ coverage.
+>    Documented illiquidity premium (Amihud 2002).
+> 6. **§11 Quality factors** (~½ day) — gross profitability (Novy-Marx 2013),
+>    accruals (Sloan 1996), asset growth (Cooper 2008) via the existing
+>    `fundamentals.py` XBRL pipeline. Same NaN profile as current 7
+>    fundamentals (2009-06 partial, 2011-06 full). Fills the biggest gap in
+>    current quality coverage — `op_income_growth_yoy` is dead, but
+>    profitability/accruals capture different axes.
 >
 > §6 paid delisted-ticker prices (do before going live — ~3-5 CAGR pts of
 > survivorship deflation expected). §1 short interest deferred (FINRA archive
@@ -990,12 +1029,19 @@ reconstructs the [1,5] split internally), and `days_to_earnings` from
 surprise-driven. Test CAGR moved +15.5% → +17.5% (+2.0 pts);
 `best_iteration` lifted 3 → 10 (the prior data-ceiling broken).
 
-**Follow-up.** Switch from 10-Q filing dates to 8-K item 2.02
-announcement dates — the actual market-moving event is the 8-K
-released ~2-4 weeks before the 10-Q. EDGAR submissions API doesn't
-expose item codes, so this requires fetching each 8-K's filing index
-to filter by item (one extra request per filing). Worth it if PEAD is
-where the lift is coming from. Tracked under [TODOs](#todos).
+**Follow-up — ✅ shipped (data path).** Switched from 10-Q filing
+dates to 8-K item 2.02 announcement dates as the PEAD anchor.
+Surprise: the EDGAR submissions API _does_ expose item codes via a
+parallel `items` array on `filings.recent` — no per-filing index
+fetch required (the prior plan in this README was wrong). 8-K filings
+are now cached alongside 10-Q/10-K rows in
+`data/earnings/{TICKER}.parquet` (new `items` column; legacy caches
+auto-refetch). `load_earnings_dates` prefers the 8-K item 2.02 date
+per earnings cycle and falls back to the matching 10-Q for older
+filings (pre-2004, before 8-K item codes were standardised) or rare
+gaps. Median 10-Q→8-K gap on a smoke-test cohort: AAPL 1d, MSFT 0d,
+NVDA 12d — most of the lift will come from names like NVDA whose
+10-Q lags meaningfully. Retrain + backtest pending to quantify.
 
 ### 3. Insider transactions from SEC EDGAR Form 4 — ✅ shipped
 
@@ -1213,6 +1259,76 @@ backtest.py reports summary stats; the interesting questions need slicing.
 - Hit rate — of each rebalance's 50 picks, how many beat SPY over the next
   21 days?
 
+### 9. FRED macro broadcast features (free, ~½ day)
+
+Same broadcast-into-interaction pattern as `vix_level` / `spy_rsi_14` — single value per date, broadcast to every ticker. Earns reward only via cross-section interactions under date-demeaned labels (e.g. "high HY OAS + high D/E → underperform"). Captures macro-stress axes that VIX/SPY don't fully cover: term-structure regime and corporate credit stress.
+
+**Series to pull (free FRED API; `fredapi` or `pandas-datareader.data.DataReader`):**
+
+| FRED ID         | Description                                           | Earliest    |
+| --------------- | ----------------------------------------------------- | ----------- |
+| `T10Y3M`        | 10-Year minus 3-Month Treasury (recession indicator)  | 1982-01     |
+| `BAMLH0A0HYM2`  | ICE BofA US High Yield Index OAS (credit stress)      | 1996-12     |
+| `DTWEXBGS` *(opt)* | Trade-weighted USD index                            | 2006-01     |
+
+**How to wire it.**
+
+1. Add `load_fred_macro()` to `data.py` mirroring `load_market()` shape (date-indexed DataFrame, one column per series, cached parquet under `data/market/`).
+2. Extend `compute_market_regime_features()` in `features.py:566` to merge the FRED frame onto the SPY date index.
+3. Append the new column names to `MARKET_REGIME_FEATURES` (`features.py:78`). They flow through `attach_market_regime` automatically.
+
+**Watch for partial redundancy.** Term spread and HY OAS capture different macro axes than VIX/SPY momentum, but if importance is 0 in both raw and interaction view after a stability sweep, prune. Treat the existing `vix_level` / `spy_rsi_14` interaction patterns as the bar to clear.
+
+### 10. Amihud illiquidity (free, ~1 hour)
+
+Documented illiquidity premium (Amihud 2002): less-liquid stocks earn higher forward returns cross-sectionally, controlling for size/vol. Cheap to add — no new data source.
+
+**Formula.**
+
+```
+ILLIQ_t = rolling_mean_21d( |daily_return_t| / dollar_volume_t )
+       where dollar_volume_t = Close_t × Volume_t
+```
+
+Scale by `1e6` for readability. Add the cross-sectional rank too (relative illiquidity within the S&P 500 matters more than absolute level). For tail-control, take `log1p` or winsorise at the 99th percentile per date — extreme low-volume sessions (early 2007, holidays) blow up the raw ratio.
+
+**How to wire it.**
+
+1. Add an `out["amihud_21d"]` block to `compute_per_ticker_features()` in `features.py:191` after the existing `vol_*` block.
+2. Append `"amihud_21d"` to `PER_TICKER_FEATURES` (`features.py:56`).
+3. Add `"amihud_21d"` to `RANKABLE` (`features.py:139`) so the panel-stage rank step picks up `amihud_21d_rank` automatically.
+
+**Coverage.** Computed from existing OHLCV — full 2007+ history, no NaN cliff.
+
+### 11. Quality factors — gross profitability, accruals, asset growth (free, ~½ day)
+
+Three well-documented academic quality factors not in your current 7 fundamentals. Same XBRL pipeline as existing fundamentals → same NaN profile (0% pre-2009-06, partial through 2011-06, full after). XGBoost handles missing natively; current `NULLABLE_FEATURES` machinery already covers this.
+
+**Factors and rationale.**
+
+| Factor                  | Formula                                            | Reference        | Sign                |
+| ----------------------- | -------------------------------------------------- | ---------------- | ------------------- |
+| `gross_profitability`   | (TTM Revenue − TTM COGS) / MRQ Total Assets        | Novy-Marx 2013   | + (the other value) |
+| `accruals`              | (ΔWC − Depreciation) / avg(MRQ Assets)             | Sloan 1996       | − (high → poor fwd) |
+| `asset_growth`          | MRQ Assets / MRQ Assets 4Q ago − 1                 | Cooper 2008      | −                   |
+
+Where `WC = current_assets − current_liabilities` (already pulled as `mrq_assets_current` − `mrq_liabilities_current`).
+
+**New XBRL tags needed in `fundamentals.py`** (add to the `_TAGS` synonym dict and the per-ticker pull):
+
+- `CostOfGoodsSold` / `CostOfRevenue` / `CostOfGoodsAndServicesSold` (synonym handling like the existing `Revenues` family).
+- `DepreciationDepletionAndAmortization` / `DepreciationAndAmortization` / `Depreciation` for accruals.
+- A 4Q-lagged `Assets` value for asset growth (the existing `mrq_assets` is already pulled; just need a prior-period version analogous to `ttm_revenue_prior`).
+
+**How to wire it.**
+
+1. Extend the TTM/MRQ pulls in `fundamentals.py` to include COGS (TTM), depreciation (TTM), and lagged assets (4Q prior MRQ).
+2. Add the three ratio computations to `attach_fundamentals()` in `features.py:383` alongside the existing 7.
+3. Append to `FUNDAMENTAL_FEATURES` (`features.py:123`) and `RANKABLE` (`features.py:139`).
+4. Sign-flip / divide-by-zero handling: same pattern as existing — set NaN when denominator ≤ 0 rather than letting negative-denominator rows produce wrong-sign signals.
+
+**Hypothesis to validate after retraining.** `op_income_growth_yoy` was dead in 5/5 stability seeds and `sales_growth_yoy` survives — earnings-form growth doesn't pay here. But profitability and asset-growth capture different axes (operational efficiency, expansion-as-overinvestment) — they should land non-zero. Accruals is the riskiest of the three (requires depreciation tag coverage, which is patchier in XBRL than revenue/COGS).
+
 ---
 
 ## TODOs
@@ -1236,7 +1352,7 @@ backtest.py reports summary stats; the interesting questions need slicing.
 - [x] feature: `excess_ret_5d_vs_sector` and `excess_ret_21d_vs_sector` (sector-relative momentum)
 - [x] fix `backtest.py` SPY end-date so headline CAGR compares like-for-like
 - [x] **feature: earnings calendar from SEC EDGAR 10-Q/10-K + yfinance forward dates** — `days_to_earnings`, `days_since_earnings`, `post_earnings_drift_window`. `days_since_earnings` lands at 14th in feature importance (0.037 gain); other two are 0.0 (kept pending review). Test CAGR +15.5% → +17.5%, `best_iteration` 3 → 10
-- [ ] follow-up: switch earnings dates from 10-Q filing to 8-K item 2.02 announcement (one extra request per filing, but anchors PEAD on the actual market-moving event ~14d earlier than 10-Q)
+- [x] follow-up: switch earnings dates from 10-Q filing to 8-K item 2.02 announcement — **shipped (data path)**. SEC submissions JSON already exposes item codes via a parallel `items` array, so the switch needed zero extra requests (not "one extra request per filing" as previously assumed). `earnings.py` caches 8-K filings (new `items` column on `data/earnings/{TICKER}.parquet`; legacy caches auto-refetch) and `load_earnings_dates` prefers 8-K item 2.02 dates per earnings cycle with 10-Q fallback for pre-2004 filings. Per-ticker median 10-Q→8-K gap varies widely: AAPL 1d, MSFT 0d, NVDA 12d. Retrain + backtest pending to quantify the PEAD-anchor lift.
 - [~] feature: short interest from FINRA bi-monthly — **deferred**. Download infrastructure shipped (`scripts/deprecated_short_interest.py`) but FINRA CDN archive starts mid-2018, so train=2007–2017 has 0% coverage and XGBoost cannot build splits on the feature. Mean-fill rejected (regime leak); sliding splits forward sacrifices test bear coverage. Revisit when paid historical short interest is added or when splits are re-platformed
 - [x] feature: insider transactions from SEC EDGAR Form 4 (`scripts/insider.py`) — bulk-TSV approach via SEC DERA's quarterly Form 3/4/5 dataset (~80 zips back to 2006q1, downloads in minutes). 4 features (buy/sell counts in 60d, net dollar volume, days-since-last-buy). All 4 earn non-zero importance; `insider_buy_count_60d` strongest at rank 25/45. Replaced an earlier per-XML scraper that got the source IP throttled.
 - [x] feature: SEC EDGAR XBRL fundamentals (`scripts/fundamentals.py`) — 7 ratios shipped (E/P, B/M, ROA, D/E, current_ratio, sales/op-income growth YoY) + split-adjusted shares for correct market cap. Final config: raw fundamentals + ranks + 5 broadcast SPY/VIX regime features brought back. **Iteration A** (raw, 500 trials, no regime): regressed (+17.5% → +15.1% CAGR; ceiling at decile spread 0.0182). **Iteration B** (raw + ranks + regime, 200 trials): **decile-spread ceiling broken** (+0.0182 → +0.0235), val IC +0.0568 (best ever in clean arch), but raw CAGR +16.2% — short of the +17.5% earnings-only headline. 3 of 5 regime features absorbed (vix_level, spy_rsi_14, spy_ret_21d); 2 dead fundamentals resurrected (B/M, sales_growth); 2 still dead (op_income_growth, current_ratio); all 7 fundamental ranks dead.
@@ -1246,10 +1362,13 @@ backtest.py reports summary stats; the interesting questions need slicing.
 - [x] make today.py read from features.parquet instead of panel.parquet — `panel.parquet` drops the most recent ~21 trading days because forward returns aren't yet realised, but those are exactly the rows today.py needs to score live. New `load_features()` helper in `scripts/features.py`.
 - [ ] system: ensemble of 5 boosters with different seeds — average predictions (free, ~½ day, +5–15% Sharpe)
 - [ ] feature: 13F institutional ownership from SEC EDGAR (~1-2 days) — quarterly Schedule 13F filings via EDGAR bulk data, same shape as insider pipeline. Candidate features: top-N largest holder count, ownership concentration (HHI on holdings), net fund buying in last quarter. Smart-money flow signal.
-- [ ] feature: FRED macro broadcast (~½ day) — yield curve slope (2y/10y), HY credit spreads, DXY dollar index via free FRED API. Broadcast regime context that interacts with cross-section. Worth checking against VIX/SPY redundancy in importance scores.
+- [ ] feature: FRED macro broadcast (~½ day) — `T10Y3M` (10y/3m term spread, 1982+) and `BAMLH0A0HYM2` (HY OAS, 1996+) via free FRED API. Both have full 2007 floor coverage. Broadcast regime context that interacts with cross-section, same shape as `vix_level` / `spy_rsi_14`. See [§9](#9-fred-macro-broadcast-features-free--day).
+- [ ] feature: Amihud illiquidity (free, ~1 hour) — rolling 21d mean of `|daily_return| / dollar_volume`, plus cross-sectional rank. Computed from existing OHLCV; full 2007+ coverage. Documented illiquidity premium (Amihud 2002). See [§10](#10-amihud-illiquidity-free-1-hour).
+- [ ] feature: quality factors — gross profitability (Novy-Marx 2013), accruals (Sloan 1996), asset growth (Cooper 2008) (~½ day) via existing XBRL pipeline. New XBRL tags needed: COGS, depreciation, 4Q-lagged assets. Same NaN profile as existing fundamentals. See [§11](#11-quality-factors--gross-profitability-accruals-asset-growth-free--day).
 - [ ] re-run null test on the clean-architecture model (current null-test table is stale)
 - [ ] data: swap yfinance → Sharadar (or equivalent) for delisted-ticker coverage — do before going live
 - [ ] follow-up stability-selection prune now that 4 new features have landed — `excess_ret_5d`, `atr_pct`, `earnings_yield`, `roa_rank` were dead in this single run, but a 5-seed sweep is needed before pruning
+- [ ] 🔴 **train.py: replace optuna objective (val decile spread) with a top-40-aligned metric** — empirical anti-correlation observed during the 8-K work (May 2026): a 350-trial sweep maximised val decile spread to 0.0183 but backtested at +18.81% raw CAGR, while `--quick` with saved DEFAULT_PARAMS (val decile spread 0.0161) backtested at +21.60%. Decile spread averages ranking across deciles 1 & 10 (~50 names each) but the strategy holds only the top 40 — the very tip of decile 1. Replace `_compute_decile_spread()` with cumulative log return (or Sharpe) of an equal-weighted top-40 portfolio over val. Until this lands, **do not run `train.py --trials N`** — the saved DEFAULT_PARAMS are the current best model. Also lower `reg_lambda` floor from 0.001 (already done) — no other range changes pending.
 
 Paste this to claude to ask
 claude --resume b63b90f4-923f-419f-b30e-00cd9006952f
