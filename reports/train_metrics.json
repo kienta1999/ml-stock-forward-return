@@ -1,17 +1,19 @@
 {
   "params": {
-    "max_depth": 4,
-    "learning_rate": 0.0054278085830524415,
-    "n_estimators": 717,
-    "min_child_weight": 5,
-    "subsample": 0.9122178209065154,
-    "colsample_bytree": 0.6264159684699684,
-    "reg_lambda": 0.010035725425724723
+    "max_depth": 5,
+    "learning_rate": 0.0019884662813417562,
+    "n_estimators": 274,
+    "min_child_weight": 1,
+    "subsample": 0.6748841148505009,
+    "colsample_bytree": 0.6236790005526994,
+    "reg_lambda": 0.3047565711822111
   },
-  "best_iteration": 29,
-  "train_rmse": 0.06867776781473232,
-  "val_rmse": 0.07389263160807562,
-  "train_ic": 0.05451989681004219,
-  "val_ic": 0.04138235685422306,
-  "val_decile_spread": 0.016082578508327477
+  "best_iteration": 19,
+  "train_rmse": 0.06879888629149632,
+  "val_rmse": 0.07394139202831619,
+  "train_ic": 0.06322278540761853,
+  "val_ic": 0.035045626283309705,
+  "val_top_n_mean_return": 0.014225291406834857,
+  "val_top_n_sharpe": 0.37857358937121116,
+  "val_decile_spread": 0.010646524912484814
 }

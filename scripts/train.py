@@ -2,8 +2,16 @@
 """Tune + train an XGBoost regressor on the panel.
 
 - Training loss:   reg:squarederror (RMSE-equivalent — what XGBoost minimizes).
-- Tuning method:   optuna TPE, ~50 trials, maximize mean daily IC on val.
-- Early stopping:  50 rounds on val RMSE.
+- Tuning method:   optuna TPE, default 50 trials, maximize **mean realised
+                   return** of the equal-weighted top-``TOP_N`` (40)
+                   portfolio on val. Objective history:
+                     • pre-May 2026: val decile spread — anti-correlated
+                       with top-40 backtest CAGR.
+                     • May 2026 (briefly): val top-N Sharpe — degenerate
+                       (best_iteration=0, val IC ≈ 0).
+                     • current: val top-N mean return — non-gameable
+                       (zero alpha → zero objective).
+- Early stopping:  100 rounds on val top-N mean return.
 - Outputs:
     models/xgb_v1.json
     reports/feature_importance.csv
@@ -34,6 +42,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from dataset import FEATURE_COLS, TARGET_COL, load_panel, split  # noqa: E402
+from strategy import TOP_N  # noqa: E402  — used as the optuna scoring window
 
 _ROOT = os.path.dirname(_HERE)
 MODEL_PATH = os.path.join(_ROOT, "models", "xgb_v1.json")
@@ -42,17 +51,17 @@ REPORTS_DIR = os.path.join(_ROOT, "reports")
 DEFAULT_TRIALS = 50
 EARLY_STOPPING_ROUNDS = 100
 
-# Defaults for --quick: last known-good params (recovered from git history).
-# Slow-build basin: lr~0.005, best_iteration=35, val IC +0.0438, val decile
-# spread +0.0184. Reproducible without tuning.
+# Defaults for --quick: best params from the May 2026 50-trial sweep under
+# the top-N mean-return objective (trial #47, val top-40 mean return +0.0142,
+# best_iteration 19, val IC +0.0350). Reproducible without tuning.
 DEFAULT_PARAMS: dict = {
-    "max_depth": 4,
-    "learning_rate": 0.0054278085830524415,
-    "n_estimators": 717,
-    "min_child_weight": 5,
-    "subsample": 0.9122178209065154,
-    "colsample_bytree": 0.6264159684699684,
-    "reg_lambda": 0.010035725425724723,
+    "max_depth": 5,
+    "learning_rate": 0.0019884662813417562,
+    "n_estimators": 274,
+    "min_child_weight": 1,
+    "subsample": 0.6748841148505009,
+    "colsample_bytree": 0.6236790005526994,
+    "reg_lambda": 0.3047565711822111,
 }
 
 
@@ -88,8 +97,13 @@ def decile_spread(
 ) -> float:
     """Mean over days of (top-decile actual return) − (bottom-decile actual return).
 
-    Direct measure of how much money the strategy would make from the model's
-    ranking, before any backtest realism (costs, holding period, sleeves).
+    Kept as a diagnostic alongside ``top_n_sharpe`` (the new optuna objective).
+    Decile spread averages ranking quality across deciles 1 & 10 (~50 names
+    each from a ~500-stock universe); the strategy holds only the top
+    ``TOP_N`` (40), so the two metrics can disagree — a model can have higher
+    decile spread but worse top-40 returns. See README §"BLOCKER" callout
+    under Next steps for the empirical anti-correlation observed during the
+    8-K work (May 2026).
     """
     df = pd.DataFrame({
         "date": dates.to_numpy(),
@@ -109,34 +123,101 @@ def decile_spread(
     return float(df.groupby("date").apply(per_date).mean())
 
 
+def _top_n_daily_returns(
+    dates: pd.Series, y_true: pd.Series, y_pred: np.ndarray, top_n: int = TOP_N
+) -> pd.Series:
+    """Per-date series of "mean realised return of the top-``top_n`` predicted names."""
+    df = pd.DataFrame({
+        "date": dates.to_numpy(),
+        "y_true": y_true.to_numpy(),
+        "y_pred": y_pred,
+    })
+
+    def per_date(g: pd.DataFrame) -> float:
+        if len(g) < top_n:
+            return np.nan
+        return g.nlargest(top_n, "y_pred")["y_true"].mean()
+
+    return df.groupby("date").apply(per_date).dropna()
+
+
+def top_n_mean_return(
+    dates: pd.Series, y_true: pd.Series, y_pred: np.ndarray, top_n: int = TOP_N
+) -> float:
+    """Mean realised return of an equal-weighted top-``TOP_N`` portfolio over val.
+
+    Active optuna objective (May 2026 → present). Replaced ``top_n_sharpe``
+    after a 50-trial sweep with the Sharpe objective produced
+    ``best_iteration=0`` / ``val_IC=+0.0069`` — optuna gamed the Sharpe ratio
+    by pushing predictions to a degenerate near-constant basin (collapsed
+    std → high mean/std even with zero learned signal). Mean return cannot
+    be gamed that way: zero alpha → zero objective.
+    """
+    daily = _top_n_daily_returns(dates, y_true, y_pred, top_n)
+    if len(daily) == 0:
+        return float("nan")
+    return float(daily.mean())
+
+
+def top_n_sharpe(
+    dates: pd.Series, y_true: pd.Series, y_pred: np.ndarray, top_n: int = TOP_N
+) -> float:
+    """Diagnostic — Sharpe of equal-weighted top-``TOP_N`` portfolio over val.
+
+    Was the optuna objective briefly in May 2026; demoted to diagnostic
+    after the degeneracy described in :func:`top_n_mean_return`. Reported
+    alongside ``val_top_n_mean_return`` to track how Sharpe moves as the
+    optimiser pushes mean return up.
+    """
+    daily = _top_n_daily_returns(dates, y_true, y_pred, top_n)
+    if len(daily) < 2:
+        return float("nan")
+    sd = float(daily.std(ddof=1))
+    if sd == 0.0:
+        return 0.0
+    return float(daily.mean() / sd)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Model factory
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _make_decile_spread_eval_metric(dates_val: np.ndarray, n_quantiles: int = 10):
+def _make_top_n_mean_return_eval_metric(dates_val: np.ndarray, top_n: int = TOP_N):
     """Closure that XGBoost calls as its eval metric on each boosting round.
 
-    Computes mean daily decile spread on the val set so early stopping picks
-    the tree count that maximises the metric we actually trade on. The inner
-    function is named ``decile_spread`` because XGBoost's sklearn wrapper
-    uses ``func.__name__`` as the metric label — this is what
-    ``EarlyStopping(metric_name="decile_spread")`` matches.
+    Computes the mean realised return of an equal-weighted top-``top_n``
+    portfolio on the val set so early stopping picks the tree count that
+    maximises the metric the strategy actually trades on. The inner
+    function is named ``top_n_mean_return`` because XGBoost's sklearn
+    wrapper uses ``func.__name__`` as the metric label — this is what
+    ``EarlyStopping(metric_name="top_n_mean_return")`` matches.
+
+    Hot path: pre-computes per-date row indices once at closure creation
+    and uses ``np.argsort(kind='stable')`` per round instead of
+    pandas ``groupby().nlargest()``. ~3-4× faster than pandas while
+    matching pandas tie-breaking (stable sort breaks ties by original
+    index, same as ``nlargest``), so ``best_iteration`` is bit-exact.
     """
-    def decile_spread(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-        df = pd.DataFrame({"date": dates_val, "y_true": y_true, "y_pred": y_pred})
+    # Pre-compute per-date row indices once; reused every boosting round.
+    _, inverse = np.unique(dates_val, return_inverse=True)
+    n_dates = int(inverse.max()) + 1 if len(inverse) else 0
+    date_groups: list[np.ndarray] = [
+        np.where(inverse == i)[0] for i in range(n_dates)
+    ]
+    # Drop dates with fewer than top_n names so the sort is always valid.
+    date_groups = [g for g in date_groups if len(g) >= top_n]
 
-        def per_date(g: pd.DataFrame) -> float:
-            if len(g) < n_quantiles:
-                return np.nan
-            g_sorted = g.sort_values("y_pred")
-            bucket_size = len(g_sorted) // n_quantiles
-            bot = g_sorted.iloc[:bucket_size]["y_true"].mean()
-            top = g_sorted.iloc[-bucket_size:]["y_true"].mean()
-            return top - bot
-
-        return float(df.groupby("date").apply(per_date).mean())
-    return decile_spread
+    def top_n_mean_return(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+        if not date_groups:
+            return float("nan")
+        daily_means = np.empty(len(date_groups), dtype=np.float64)
+        for i, idx in enumerate(date_groups):
+            preds = y_pred[idx]
+            top_idx = np.argsort(-preds, kind="stable")[:top_n]
+            daily_means[i] = y_true[idx][top_idx].mean()
+        return float(daily_means.mean())
+    return top_n_mean_return
 
 
 def _make_model(
@@ -144,14 +225,16 @@ def _make_model(
 ) -> xgb.XGBRegressor:
     """XGBoost regressor with native categorical (gics_sector) support.
 
-    Early stopping watches val decile spread (maximize, save_best) — the
-    metric the strategy actually cares about. IC and decile spread can
-    disagree (e.g. depth-8 trees produce clumpy predictions with high IC
-    but poor decile separation), so we score on the one tied to P&L.
+    Early stopping watches val top-``TOP_N`` mean realised return
+    (maximize, save_best) — the raw return the strategy delivers, which
+    cannot be gamed by predicting a near-constant. Decile spread was the
+    objective until May 2026 (anti-correlated with top-40 CAGR); a brief
+    Sharpe-objective experiment hit a degenerate basin (best_iteration=0,
+    val IC ≈ 0). Mean return is the simplest non-gameable choice.
     """
     es = xgb.callback.EarlyStopping(
         rounds=EARLY_STOPPING_ROUNDS,
-        metric_name="decile_spread",
+        metric_name="top_n_mean_return",
         maximize=True,
         save_best=True,
     )
@@ -161,7 +244,7 @@ def _make_model(
         enable_categorical=True,
         random_state=seed,
         n_jobs=-1,
-        eval_metric=_make_decile_spread_eval_metric(dates_val.to_numpy()),
+        eval_metric=_make_top_n_mean_return_eval_metric(dates_val.to_numpy()),
         callbacks=[es],
         **params,
     )
@@ -181,16 +264,16 @@ def _objective(
     dates_val: pd.Series,
     seed: int = 42,
 ) -> float:
-    """Train one model with the trial's hyperparameters; return val decile spread.
+    """Train one model with the trial's hyperparameters; return val top-N mean return.
 
-    XGBoost's internal loss is RMSE (smooth gradient), but we score the model
-    by decile spread — the strategy actually trades the top/bottom buckets,
-    not the rank-correlation order. ``max_depth`` is fixed at 3: depth-8
-    produces clumpy predictions that score well on IC but collapse decile
-    separation, and depth-4/5 give equivalent val spread to depth-3 (we
-    explored 3-5 in optuna and the basin is flat at the top, so we pick the
-    shallowest config — most trees, smoothest predictions, lowest single-tree
-    risk). See README v1 results.
+    XGBoost's internal loss is RMSE (smooth gradient), but we score the
+    model by the mean realised return of an equal-weighted top-``TOP_N``
+    portfolio — the raw P&L the strategy delivers. Decile spread (the
+    prior objective) was anti-correlated with top-40 backtest CAGR in the
+    May 2026 8-K work; a brief Sharpe-objective experiment hit a
+    degenerate basin (best_iteration=0). See README §"BLOCKER" callout
+    for details. ``max_depth`` is fixed at 3: depth-8 produces clumpy
+    predictions that score well on IC but collapse top-N selection.
     """
     params = {
         # max_depth=6 has been provably dominated across 4 sweeps (always in
@@ -222,7 +305,7 @@ def _objective(
     model = _make_model(params, dates_val, seed=seed)
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
     y_pred = model.predict(X_val)
-    return decile_spread(dates_val, y_val, y_pred)
+    return top_n_mean_return(dates_val, y_val, y_pred)
 
 
 def tune(
@@ -276,6 +359,10 @@ def fit_and_evaluate(
         "val_rmse": rmse(y_val, y_val_pred),
         "train_ic": daily_ic(dates_train, y_train, y_train_pred),
         "val_ic": daily_ic(dates_val, y_val, y_val_pred),
+        # Active optuna objective: mean realised return of top-N portfolio over val.
+        "val_top_n_mean_return": top_n_mean_return(dates_val, y_val, y_val_pred),
+        # Diagnostics — track how the optimiser trades risk vs raw return.
+        "val_top_n_sharpe": top_n_sharpe(dates_val, y_val, y_val_pred),
         "val_decile_spread": decile_spread(dates_val, y_val, y_val_pred),
     }
     return model, metrics
@@ -336,8 +423,12 @@ def _print_metrics(metrics: dict) -> None:
     )
     print(
         f"  val   RMSE: {metrics['val_rmse']:.4f}   "
-        f"val   IC: {metrics['val_ic']:+.4f}   "
-        f"decile spread: {metrics['val_decile_spread']:+.4f}"
+        f"val   IC: {metrics['val_ic']:+.4f}"
+    )
+    print(
+        f"  val top-{TOP_N} mean return: {metrics['val_top_n_mean_return']:+.4f}  "
+        f"(Sharpe diag: {metrics['val_top_n_sharpe']:+.4f}  "
+        f"decile spread diag: {metrics['val_decile_spread']:+.4f})"
     )
     print(f"  best iteration: {metrics['best_iteration']}")
 
@@ -384,11 +475,15 @@ def main() -> None:
         best_params = dict(DEFAULT_PARAMS)
         study = None
     else:
-        print(f"\nRunning optuna ({args.trials} trials, maximize val decile spread)...")
+        print(
+            f"\nRunning optuna ({args.trials} trials, maximize val top-{TOP_N} mean return)..."
+        )
         best_params, study = tune(
             X_train, y_train, X_val, y_val, dates_val, args.trials, seed=args.seed
         )
-        print(f"\nBest val decile spread during tuning: {study.best_value:+.4f}")
+        print(
+            f"\nBest val top-{TOP_N} mean return during tuning: {study.best_value:+.4f}"
+        )
         print("Best params:")
         for k, v in best_params.items():
             print(f"  {k}: {v}")

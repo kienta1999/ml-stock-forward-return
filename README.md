@@ -441,37 +441,50 @@ gives feature importances for free.
 
 ### Three roles, two metrics
 
-| Role                    | Metric                              | Why                                                                                                                                                                                                                                                                                                                                                        |
-| ----------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Training loss           | **RMSE** (`reg:squarederror`)       | XGBoost needs a smooth differentiable loss; RMSE is the default and gives stable gradients.                                                                                                                                                                                                                                                                |
-| Tuning + early stopping | **mean daily decile spread** on val | We don't trade IC, we trade the top decile. IC and decile spread can disagree (deep trees can produce clumpy predictions with high IC but poor decile separation), so we score on the metric tied to P&L. Both the optuna objective and the per-round early-stopping rule maximise val decile spread; keeping them aligned matters (see v1 results below). |
-| Reporting               | **RMSE + IC + decile spread**       | Cross-checks: RMSE catches magnitude blow-ups, IC catches ranking quality, decile spread is the most direct proxy for strategy P&L.                                                                                                                                                                                                                        |
+| Role                    | Metric                                                      | Why                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ----------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Training loss           | **RMSE** (`reg:squarederror`)                               | XGBoost needs a smooth differentiable loss; RMSE is the default and gives stable gradients.                                                                                                                                                                                                                                                                                                                      |
+| Tuning + early stopping | **val top-N (40) mean realised return**                     | We don't trade IC and we don't trade the full decile — we trade the top-40 portfolio. Decile spread (the prior objective) averages ranking quality across the top and bottom ~50 names each, but the strategy only holds the tip of decile 1, so the two metrics can disagree. Empirically, sweeps that maximised val decile spread backtested 2–3 CAGR pts WORSE than `--quick` (see "Objective evolution" note below). Both the optuna objective and the per-round early-stopping rule now maximise val top-40 mean return. |
+| Reporting               | **RMSE + IC + top-40 mean return + Sharpe + decile spread** | Cross-checks: RMSE catches magnitude blow-ups, IC catches ranking quality, top-40 mean return is the most direct proxy for strategy P&L, and Sharpe + decile spread are kept as diagnostics to track how the optimiser trades risk vs raw return.                                                                                                                                                                |
+
+**Objective evolution (May 2026):** decile spread → top-N Sharpe (1 sweep,
+abandoned — Sharpe was gamed by collapsing prediction variance, hit
+`best_iteration=0` / val IC ≈ 0) → **top-N mean return** (current). Mean
+return cannot be gamed the same way: zero alpha → zero objective. Eval
+metric implementation note: the per-round callback uses
+`np.argsort(-preds, kind='stable')[:top_n]` per date (~3-4× faster than
+the pandas `groupby().nlargest()` it replaced); stable sort matches pandas
+tie-breaking exactly, so `best_iteration` is bit-reproducible across runs.
 
 ### Hyperparameter search
 
 Tuned with **optuna** (TPE sampler, ~50 trials). Knobs and ranges:
 
-| Param              | Range          | What it controls                                                                                                                                                                                   |
-| ------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `max_depth`        | fixed at 3     | Depth-8 collapses decile separation (clumpy predictions); 3–5 give equivalent val spread, so we pick the shallowest — most trees, smoothest predictions.                                           |
-| `learning_rate`    | 0.01–0.1 (log) | How aggressively each tree corrects errors. Smaller + more trees usually wins. Range tightened from 0.01–0.3 after early-stopping was firing too aggressively on demeaned labels (see v1 results). |
-| `n_estimators`     | 200–1000       | Max number of trees. Capped by early stopping.                                                                                                                                                     |
-| `min_child_weight` | 1–20           | Minimum sum of sample weights per leaf. Higher = simpler trees.                                                                                                                                    |
-| `subsample`        | 0.6–1.0        | Row sampling per tree. <1 adds randomness → robustness.                                                                                                                                            |
-| `colsample_bytree` | 0.6–1.0        | Feature sampling per tree. Same idea, on columns.                                                                                                                                                  |
-| `reg_lambda`       | 0.01–10 (log)  | L2 regularization on leaf weights.                                                                                                                                                                 |
+| Param              | Range             | What it controls                                                                                                                                                                                                                                                                            |
+| ------------------ | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `max_depth`        | 3–5               | Depth-6+ dominated in 4 prior sweeps (always worst trials). Depth-3 still wins frequently, but rank-normalized fundamentals + 8-K interactions occasionally pay for depth 4-5; window kept narrow.                                                                                          |
+| `learning_rate`    | 0.001–0.02 (log)  | Tightened from 0.005–0.3 after the slow-build basin (lr~0.005, best_iteration 13-43) consistently outperformed the aggressive-shallow basin (lr~0.03+, best_iteration ~5). 50-trial TPE was burning trials on the latter; capping at 0.02 forces optuna into the productive region.         |
+| `n_estimators`     | 200–1000          | Max number of trees. Capped by early stopping (typically 19–43).                                                                                                                                                                                                                            |
+| `min_child_weight` | 1–20              | Minimum sum of sample weights per leaf. Higher = simpler trees.                                                                                                                                                                                                                             |
+| `subsample`        | 0.6–1.0           | Row sampling per tree. <1 adds randomness → robustness.                                                                                                                                                                                                                                     |
+| `colsample_bytree` | 0.55–0.75         | Tightened from 0.6–1.0. **0.629 has been the actual lever unlocking cross-sectional signal** across sweeps — values >0.8 give every tree almost-all features and collapse top-N selection. Window stays asymmetric around 0.629 so optuna can still wander.                                 |
+| `reg_lambda`       | 0.001–10 (log)    | L2 regularization on leaf weights. Floor lowered from 0.01 because the prior known-good optimum (0.01003) was bumping the wall.                                                                                                                                                             |
 
-Each trial trains one model with early stopping (100 rounds on val decile
-spread, maximize, save_best) and returns mean daily val decile spread. Optuna
-picks the next combo to try based on what's worked so far. The final model is
-refit on the best params and saved to `models/xgb_v1.json`.
+Each trial trains one model with early stopping (100 rounds on val top-40
+mean return, maximize, save_best) and returns val top-40 mean realised
+return. Optuna picks the next combo to try based on what's worked so far.
+The final model is refit on the best params and saved to `models/xgb_v1.json`.
+
+`--quick` skips tuning and uses the saved best params from the May 2026
+50-trial sweep (`val top-40 mean return = +0.0142`, `best_iteration = 19`).
+Bit-reproducible — every `--quick` run regenerates the identical model.
 
 ### Outputs
 
 - `models/xgb_v1.json` — trained booster
 - `reports/feature_importance.csv` — per-feature gain importance
 - `reports/optuna_trials.csv` — full tuning history (params + IC per trial)
-- `reports/train_metrics.json` — final train/val RMSE + IC + decile spread + chosen params
+- `reports/train_metrics.json` — final train/val RMSE + IC + top-40 mean return + Sharpe + decile spread + chosen params
 
 ### v1 results (val 2018–2020)
 
@@ -951,17 +964,20 @@ for further alpha.
 >    is **neutral, not lift-positive on top-40 backtest**. The lift may
 >    only appear after the optuna objective is realigned with the strategy
 >    (see #2 below).
-> 2. **🔴 BLOCKER: optuna objective is anti-correlated with top-40 CAGR**
->    (~½ day). A 350-trial sweep on the 8-K panel maximised val decile
->    spread to 0.0183 (best ever) but backtested at +18.81% CAGR, while
->    `--quick` with saved params hit val decile spread of only 0.0161 and
->    backtested at **+21.60% CAGR**. Decile spread averages ranking
->    quality across deciles 1 & 10 (~50 names each); the strategy holds
->    only the top 40, the very tip of decile 1. Replace
->    `_compute_decile_spread()` with a top-40-aligned metric (cumulative
->    log return of an equal-weighted top-40 portfolio over val, or its
->    Sharpe) before any further tuning. Until then, **`train.py --quick`
->    is your best model — do not run optuna sweeps for tuning.**
+> 2. **✅ Optuna objective realigned with top-40** (May 2026). Replaced
+>    val decile spread with **val top-40 mean realised return** as both
+>    the per-round eval metric (early stopping) and the trial objective.
+>    A brief Sharpe-objective detour was abandoned (optimiser hit
+>    `best_iteration=0` by collapsing prediction variance). 50-trial sweep
+>    under the new objective: val top-40 mean return +0.0142,
+>    `best_iteration=19`, raw backtest **+21.79% CAGR / Sharpe 0.84**
+>    (vs prior decile-spread tune at 21.60% / 0.86). Backtest performance
+>    is within noise; the real win is that objective ↔ strategy are now
+>    aligned, so future optuna sweeps optimise what is actually traded.
+>    Eval-metric implementation switched from pandas `groupby().nlargest()`
+>    to numpy `argsort(-preds, kind='stable')[:top_n]` with pre-computed
+>    per-date index groups → ~3-4× faster per trial (157s/trial → ~45-50s
+>    on a 50-trial sweep), bit-exact under stable-sort tie-breaking.
 > 3. **§5 ensemble of 5 seeds** (~½ day) — average predictions across 5
 >    boosters with different RNG seeds. Documented +5-15% Sharpe. Reuses the
 >    seed-sweep tooling from the stability prune. Run after #2 lands so the
@@ -1363,6 +1379,20 @@ Where `WC = current_assets − current_liabilities` (already pulled as `mrq_asse
 - [ ] system: ensemble of 5 boosters with different seeds — average predictions (free, ~½ day, +5–15% Sharpe)
 - [ ] feature: 13F institutional ownership from SEC EDGAR (~1-2 days) — quarterly Schedule 13F filings via EDGAR bulk data, same shape as insider pipeline. Candidate features: top-N largest holder count, ownership concentration (HHI on holdings), net fund buying in last quarter. Smart-money flow signal.
 - [ ] feature: FRED macro broadcast (~½ day) — `T10Y3M` (10y/3m term spread, 1982+) and `BAMLH0A0HYM2` (HY OAS, 1996+) via free FRED API. Both have full 2007 floor coverage. Broadcast regime context that interacts with cross-section, same shape as `vix_level` / `spy_rsi_14`. See [§9](#9-fred-macro-broadcast-features-free--day).
+- [ ] feature: extended recession-probability suite (~1 day) — broadcast regime block beyond §9, designed to interact with cross-section under stress. All free; all earliest dates predate the 2007 train floor.
+  - **FRED series** (free API via `fredapi` / `pandas-datareader`):
+    - `RECPROUSM156N` — NY Fed monthly P(US recession in 12 months), derived from the yield curve. 1959+. Cleanest single pre-computed predictor — model gets a probability instead of having to learn the inversion shape itself.
+    - `T10Y2Y` — 10Y minus 2Y Treasury, popular alternative to §9's `T10Y3M`. 1976+. A/B-test against T10Y3M to see which inversion definition the cross-section reacts to.
+    - `SAHMCURRENT` — Sahm rule (3-month avg unemployment minus prior-12-month low; ≥ 0.5pp = real-time recession trigger). 1948+. Labor-market signal independent of yield curve.
+    - `CFNAI` — Chicago Fed National Activity Index, 85-indicator composite. < −0.7 historically marks recessions. 1967+.
+    - `USSLIND` — Philly Fed Leading Index for the United States. Forward-looking diffusion. 1982+.
+    - `USALOLITONOSTSAM` — OECD Composite Leading Indicator for the US. 1955+. Mirrors CFNAI with a different basket — useful for diversification.
+    - `ICSA` — Initial unemployment claims (weekly); take 4-week moving average. 1967+. High-frequency labor signal.
+  - **Non-FRED nowcasts** (free, JSON, lower priority — require daily scraping):
+    - Atlanta Fed GDPNow — `atlantafed.org/cqer/research/gdpnow` (live GDP estimate).
+    - NY Fed Staff Nowcast — `newyorkfed.org/research/policy/nowcast` (similar real-time GDP nowcast).
+  - **Reference only — never a feature**: `USREC` (NBER official recession indicator, retrospective binary). Use for attribution / per-regime backtest slicing only; using it as a feature is a look-ahead violation since NBER dates recessions in arrears.
+  - **Watch for redundancy.** `RECPROUSM156N` is itself derived from the yield curve, so its signal partially overlaps `T10Y3M`. Hope is that stress measures from different domains (rates → labor → leading composites) capture distinct cross-section interactions; prune via stability sweep after wiring.
 - [ ] feature: Amihud illiquidity (free, ~1 hour) — rolling 21d mean of `|daily_return| / dollar_volume`, plus cross-sectional rank. Computed from existing OHLCV; full 2007+ coverage. Documented illiquidity premium (Amihud 2002). See [§10](#10-amihud-illiquidity-free-1-hour).
 - [ ] feature: quality factors — gross profitability (Novy-Marx 2013), accruals (Sloan 1996), asset growth (Cooper 2008) (~½ day) via existing XBRL pipeline. New XBRL tags needed: COGS, depreciation, 4Q-lagged assets. Same NaN profile as existing fundamentals. See [§11](#11-quality-factors--gross-profitability-accruals-asset-growth-free--day).
 - [ ] re-run null test on the clean-architecture model (current null-test table is stale)
