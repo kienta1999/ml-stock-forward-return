@@ -77,16 +77,16 @@ filters and picks. Here we score and sort.
 
 ## Methodology
 
-| Stage    | What it does                                                                                                                                                                                                                                                                                                                                                                             |
-| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Universe | Point-in-time S&P 500 (1996+ membership CSV) joined with current Wikipedia sectors                                                                                                                                                                                                                                                                                                       |
-| Data     | yfinance OHLCV 2005-07-01 → today (1.5y buffer for 252d warmup), per-ticker parquet cache, plus SPY + ^VIX                                                                                                                                                                                                                                                                               |
+| Stage    | What it does                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Universe | Point-in-time S&P 500 (1996+ membership CSV) joined with current Wikipedia sectors                                                                                                                                                                                                                                                                                                                                                 |
+| Data     | yfinance OHLCV 2005-07-01 → today (1.5y buffer for 252d warmup), per-ticker parquet cache, plus SPY + ^VIX                                                                                                                                                                                                                                                                                                                         |
 | Features | 10 per-ticker technicals + 3 ticker-specific market-context + 3 broadcast SPY/VIX regime context + 3 broadcast FRED macro regime (term spread, IG credit spread, 5y5y inflation) + 1 sector-relative + 2 earnings calendar + 6 XBRL fundamentals + 14 cross-sectional ranks + 4 insider Form 4 + sector cat = **47 total** (after 5-seed stability-selection prune — see [Stability-selection prune](#stability-selection-prune)). |
-| Label    | `forward_21d_return − date_mean(forward_21d_return)` — date-demeaned (cross-sectional excess). Raw `forward_21d_return` is clipped to ±0.5 first to cap dead-ticker outliers, then demeaned. The model can only learn within-date ordering, not market direction.                                                                                                                        |
-| Split    | Train 2007–2017, Val 2018–2020, Test 2021→. Chronological. No shuffling.                                                                                                                                                                                                                                                                                                                 |
-| Model    | XGBoost regressor, RMSE loss, optuna-tuned on val decile spread (max_depth ∈ [3, 6], 100 trials, ES=100 rounds)                                                                                                                                                                                                                                                                          |
-| Backtest | Long-only top-40, monthly rebalance, vol-targeted sizing overlay (`exposure = min(1.0, 0.20 / spy_vol_20d)`), 21 shifted-start offsets                                                                                                                                                                                                                                                                                   |
-| Costs    | 5 bps per side on rebalance turnover                                                                                                                                                                                                                                                                                                                                                     |
+| Label    | `forward_21d_return − date_mean(forward_21d_return)` — date-demeaned (cross-sectional excess). Raw `forward_21d_return` is clipped to ±0.5 first to cap dead-ticker outliers, then demeaned. The model can only learn within-date ordering, not market direction.                                                                                                                                                                  |
+| Split    | Train 2007–2017, Val 2018–2020, Test 2021→. Chronological. No shuffling.                                                                                                                                                                                                                                                                                                                                                           |
+| Model    | XGBoost regressor, RMSE loss, optuna-tuned on val decile spread (max_depth ∈ [3, 6], 100 trials, ES=100 rounds)                                                                                                                                                                                                                                                                                                                    |
+| Backtest | Long-only top-40, monthly rebalance, vol-targeted sizing overlay (`exposure = min(1.0, 0.20 / spy_vol_20d)`), 21 shifted-start offsets                                                                                                                                                                                                                                                                                             |
+| Costs    | 5 bps per side on rebalance turnover                                                                                                                                                                                                                                                                                                                                                                                               |
 
 Every feature on row date=D uses only data observable at the close of D.
 `dataset.assert_no_lookahead()` samples random rows and recomputes features
@@ -241,15 +241,15 @@ is current even if the upstream `SP_500_Historical_Component.csv` is stale).
 
 Modes:
 
-| Command                       | What runs                                                                                |
-| ----------------------------- | ---------------------------------------------------------------------------------------- |
-| **`run_all.py`**              | **🚨 daily / catch-up — universe → data → earnings → insider → fundamentals → features → labels → today. See callout above.** |
-| `run_all.py --retrain`        | (default) + train + backtest                                                             |
-| `run_all.py --full`           | alias for `--retrain` (universe is now refreshed on every run, so the flag is redundant) |
-| `run_all.py --download-only`  | refresh raw data caches only (universe → data → earnings → insider → fundamentals), then stop |
-| `run_all.py --no-today`       | refresh + optional retrain only, skip live picks                                         |
-| `run_all.py --no-diff`        | run today.py without `--diff`                                                            |
-| `run_all.py --dry-run`        | print the plan, don't execute                                                            |
+| Command                      | What runs                                                                                                                     |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| **`run_all.py`**             | **🚨 daily / catch-up — universe → data → earnings → insider → fundamentals → features → labels → today. See callout above.** |
+| `run_all.py --retrain`       | (default) + train + backtest                                                                                                  |
+| `run_all.py --full`          | alias for `--retrain` (universe is now refreshed on every run, so the flag is redundant)                                      |
+| `run_all.py --download-only` | refresh raw data caches only (universe → data → earnings → insider → fundamentals), then stop                                 |
+| `run_all.py --no-today`      | refresh + optional retrain only, skip live picks                                                                              |
+| `run_all.py --no-diff`       | run today.py without `--diff`                                                                                                 |
+| `run_all.py --dry-run`       | print the plan, don't execute                                                                                                 |
 
 Equivalent manual sequence (if you want to run pieces individually):
 
@@ -361,10 +361,10 @@ yield-curve and credit-spread signals capture macro stress those don't
 see. The 10y–3m term spread is the NY Fed's official recession predictor
 and inverted hard in 2019/2022/2023 within our test window.
 
-| Feature             | Definition                              | What it captures                                                                                                                |
-| ------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `term_spread_10y3m` | `DGS10 − DGS3MO` (% pts)                | Yield-curve regime. Inverts 6–18mo before postwar US recessions. Negative in 2019, 2022-23, the test window's macro stress.     |
-| `ig_credit_spread`  | `BAA10Y` — Moody's Baa minus 10y (% pts) | Investment-grade corporate credit stress. Spikes in risk-off (peaked 6.16 in March 2020). Equity-vol's debt-market counterpart. |
+| Feature             | Definition                                             | What it captures                                                                                                                |
+| ------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `term_spread_10y3m` | `DGS10 − DGS3MO` (% pts)                               | Yield-curve regime. Inverts 6–18mo before postwar US recessions. Negative in 2019, 2022-23, the test window's macro stress.     |
+| `ig_credit_spread`  | `BAA10Y` — Moody's Baa minus 10y (% pts)               | Investment-grade corporate credit stress. Spikes in risk-off (peaked 6.16 in March 2020). Equity-vol's debt-market counterpart. |
 | `inflation_5y5y`    | `T5YIFR` — 5-Year 5-Year Forward Inflation Expectation | Long-run inflation regime. Captures shifts VIX missed in 2022 — when realised inflation cracked but VIX stayed muted.           |
 
 **Data source.** FRED's free CSV endpoint (`fredgraph.csv?id=<series>`)
@@ -405,11 +405,11 @@ Why: a 30% trailing return in 2008 ≠ a 30% return in 2017. Ranks normalise out
 
 ### Bucket 6 — earnings calendar (3)
 
-| Feature                      | Definition                                                                                                      | What it captures                                                                                                                                                                                                                         |
-| ---------------------------- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `days_to_earnings`           | days from row date to next known earnings event (EDGAR 8-K item 2.02 + yfinance forward calendar), clipped [0, 90] | Pre-earnings positioning. **Previously 0.0 importance** under 10-Q anchoring — re-evaluation pending after the 8-K switch. |
+| Feature                      | Definition                                                                                                                            | What it captures                                                                                                                                                                                 |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `days_to_earnings`           | days from row date to next known earnings event (EDGAR 8-K item 2.02 + yfinance forward calendar), clipped [0, 90]                    | Pre-earnings positioning. **Previously 0.0 importance** under 10-Q anchoring — re-evaluation pending after the 8-K switch.                                                                       |
 | `days_since_earnings`        | days since most recent earnings announcement (8-K item 2.02, falling back to 10-Q for older / pre-item-code filings), clipped [0, 90] | **Post-earnings drift signal — 14th in feature importance (0.037 gain) under the old 10-Q anchor.** The 8-K switch anchors PEAD on the actual market-moving event ~14 days earlier; retrain TBD. |
-| `post_earnings_drift_window` | `1.0` if `days_since_earnings ∈ [1, 5]` else `0.0`                                                              | Hand-coded PEAD window flag. **0.0 importance** — XGBoost reconstructs the same split internally from the continuous `days_since_earnings`. Already disabled in `EARNINGS_FEATURES`. |
+| `post_earnings_drift_window` | `1.0` if `days_since_earnings ∈ [1, 5]` else `0.0`                                                                                    | Hand-coded PEAD window flag. **0.0 importance** — XGBoost reconstructs the same split internally from the continuous `days_since_earnings`. Already disabled in `EARNINGS_FEATURES`.             |
 
 **Data source.** SEC EDGAR submissions API gives every filing
 (8-K / 10-Q / 10-K, plus amendments) for tickers with a current CIK
@@ -433,12 +433,12 @@ Per-ticker parquets live at `data/earnings/{TICKER}.parquet` and
 
 ### Bucket 8 — insider transactions (4)
 
-| Feature                       | Definition                                                                                          | What it captures                                                                                                                           |
-| ----------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `insider_buy_count_60d`       | # direct open-market P (purchase) Form 4 filings in `(D − 60d, D]`                                  | Officer/director conviction buying. Cross-sectionally rare → strong signal when present.                                                   |
-| `insider_sell_count_60d`      | # direct open-market S (sale) Form 4 filings in the same window                                     | Sales are noisier (10b5-1 plans, diversification) — counted but de-weighted by net dollar.                                                 |
-| `insider_net_dollar_60d`      | `Σ(P value) − Σ(S value)` over the window, where `value = shares × price`                          | Signed dollar conviction. Positive = net insider buying, magnitude scaled by trade size.                                                   |
-| `days_since_last_insider_buy` | days from D back to the most recent P filing on or before D, capped at 365 (NaN if no buy on record) | Decaying memory of the last buy. Empty for tickers with no historical insider purchases.                                                   |
+| Feature                       | Definition                                                                                           | What it captures                                                                           |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `insider_buy_count_60d`       | # direct open-market P (purchase) Form 4 filings in `(D − 60d, D]`                                   | Officer/director conviction buying. Cross-sectionally rare → strong signal when present.   |
+| `insider_sell_count_60d`      | # direct open-market S (sale) Form 4 filings in the same window                                      | Sales are noisier (10b5-1 plans, diversification) — counted but de-weighted by net dollar. |
+| `insider_net_dollar_60d`      | `Σ(P value) − Σ(S value)` over the window, where `value = shares × price`                            | Signed dollar conviction. Positive = net insider buying, magnitude scaled by trade size.   |
+| `days_since_last_insider_buy` | days from D back to the most recent P filing on or before D, capped at 365 (NaN if no buy on record) | Decaying memory of the last buy. Empty for tickers with no historical insider purchases.   |
 
 **Asof key.** All four features use `filing_date` (not `transaction_date`)
 for the as-of cut. Form 4 must be filed within 2 business days of the
@@ -497,11 +497,11 @@ gives feature importances for free.
 
 ### Three roles, two metrics
 
-| Role                    | Metric                                                      | Why                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ----------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Training loss           | **RMSE** (`reg:squarederror`)                               | XGBoost needs a smooth differentiable loss; RMSE is the default and gives stable gradients.                                                                                                                                                                                                                                                                                                                      |
+| Role                    | Metric                                                      | Why                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ----------------------- | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Training loss           | **RMSE** (`reg:squarederror`)                               | XGBoost needs a smooth differentiable loss; RMSE is the default and gives stable gradients.                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | Tuning + early stopping | **val top-N (40) mean realised return**                     | We don't trade IC and we don't trade the full decile — we trade the top-40 portfolio. Decile spread (the prior objective) averages ranking quality across the top and bottom ~50 names each, but the strategy only holds the tip of decile 1, so the two metrics can disagree. Empirically, sweeps that maximised val decile spread backtested 2–3 CAGR pts WORSE than `--quick` (see "Objective evolution" note below). Both the optuna objective and the per-round early-stopping rule now maximise val top-40 mean return. |
-| Reporting               | **RMSE + IC + top-40 mean return + Sharpe + decile spread** | Cross-checks: RMSE catches magnitude blow-ups, IC catches ranking quality, top-40 mean return is the most direct proxy for strategy P&L, and Sharpe + decile spread are kept as diagnostics to track how the optimiser trades risk vs raw return.                                                                                                                                                                |
+| Reporting               | **RMSE + IC + top-40 mean return + Sharpe + decile spread** | Cross-checks: RMSE catches magnitude blow-ups, IC catches ranking quality, top-40 mean return is the most direct proxy for strategy P&L, and Sharpe + decile spread are kept as diagnostics to track how the optimiser trades risk vs raw return.                                                                                                                                                                                                                                                                             |
 
 **Objective evolution (May 2026):** decile spread → top-N Sharpe (1 sweep,
 abandoned — Sharpe was gamed by collapsing prediction variance, hit
@@ -516,15 +516,15 @@ tie-breaking exactly, so `best_iteration` is bit-reproducible across runs.
 
 Tuned with **optuna** (TPE sampler, ~50 trials). Knobs and ranges:
 
-| Param              | Range             | What it controls                                                                                                                                                                                                                                                                            |
-| ------------------ | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `max_depth`        | 3–5               | Depth-6+ dominated in 4 prior sweeps (always worst trials). Depth-3 still wins frequently, but rank-normalized fundamentals + 8-K interactions occasionally pay for depth 4-5; window kept narrow.                                                                                          |
-| `learning_rate`    | 0.001–0.02 (log)  | Tightened from 0.005–0.3 after the slow-build basin (lr~0.005, best_iteration 13-43) consistently outperformed the aggressive-shallow basin (lr~0.03+, best_iteration ~5). 50-trial TPE was burning trials on the latter; capping at 0.02 forces optuna into the productive region.         |
-| `n_estimators`     | 200–1000          | Max number of trees. Capped by early stopping (typically 19–43).                                                                                                                                                                                                                            |
-| `min_child_weight` | 1–20              | Minimum sum of sample weights per leaf. Higher = simpler trees.                                                                                                                                                                                                                             |
-| `subsample`        | 0.6–1.0           | Row sampling per tree. <1 adds randomness → robustness.                                                                                                                                                                                                                                     |
-| `colsample_bytree` | 0.55–0.75         | Tightened from 0.6–1.0. **0.629 has been the actual lever unlocking cross-sectional signal** across sweeps — values >0.8 give every tree almost-all features and collapse top-N selection. Window stays asymmetric around 0.629 so optuna can still wander.                                 |
-| `reg_lambda`       | 0.001–10 (log)    | L2 regularization on leaf weights. Floor lowered from 0.01 because the prior known-good optimum (0.01003) was bumping the wall.                                                                                                                                                             |
+| Param              | Range            | What it controls                                                                                                                                                                                                                                                                    |
+| ------------------ | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `max_depth`        | 3–5              | Depth-6+ dominated in 4 prior sweeps (always worst trials). Depth-3 still wins frequently, but rank-normalized fundamentals + 8-K interactions occasionally pay for depth 4-5; window kept narrow.                                                                                  |
+| `learning_rate`    | 0.001–0.02 (log) | Tightened from 0.005–0.3 after the slow-build basin (lr~0.005, best_iteration 13-43) consistently outperformed the aggressive-shallow basin (lr~0.03+, best_iteration ~5). 50-trial TPE was burning trials on the latter; capping at 0.02 forces optuna into the productive region. |
+| `n_estimators`     | 200–1000         | Max number of trees. Capped by early stopping (typically 19–43).                                                                                                                                                                                                                    |
+| `min_child_weight` | 1–20             | Minimum sum of sample weights per leaf. Higher = simpler trees.                                                                                                                                                                                                                     |
+| `subsample`        | 0.6–1.0          | Row sampling per tree. <1 adds randomness → robustness.                                                                                                                                                                                                                             |
+| `colsample_bytree` | 0.55–0.75        | Tightened from 0.6–1.0. **0.629 has been the actual lever unlocking cross-sectional signal** across sweeps — values >0.8 give every tree almost-all features and collapse top-N selection. Window stays asymmetric around 0.629 so optuna can still wander.                         |
+| `reg_lambda`       | 0.001–10 (log)   | L2 regularization on leaf weights. Floor lowered from 0.01 because the prior known-good optimum (0.01003) was bumping the wall.                                                                                                                                                     |
 
 Each trial trains one model with early stopping (100 rounds on val top-40
 mean return, maximize, save_best) and returns val top-40 mean realised
@@ -659,12 +659,11 @@ Properties:
 - **Triggered at rebalance** — exposure is recomputed every 21 trading days,
   not daily. Mid-hold vol spikes don't trigger an emergency sell; the
   overlay reacts at the next scheduled rebalance. For live use,
-  `today.py` reads *today's* SPY vol, so daily reruns give a near-real-time
+  `today.py` reads _today's_ SPY vol, so daily reruns give a near-real-time
   recommendation independent of the backtest cadence.
 - **Empirical 2008 stress test** (leave-2008-out walk-forward, train
   2010-2019 / test 2007-2009): raw MaxDD -64.6%, raw CAGR +6.9% vs
-  SPY -5.7%. Vol-target overlay sized exposure down hard during Sep-Nov
-  2008. To re-run this experiment: see `dataset.py` constants and `TEST_END`.
+  SPY -5.7%. Vol-target overlay sized exposure down hard during Sep-Nov 2008. To re-run this experiment: see `dataset.py` constants and `TEST_END`.
 - **Empirical 2021-2026** (no real vol-bomb in this window): vol-target's
   average exposure stayed ~95% — overlay barely activated because the 2022
   bear was a slow grind, not a vol explosion. MaxDD improved ~2pts vs raw
@@ -688,8 +687,8 @@ strength. On the 2021→2026 test window, switching equal→pred at the
 default `--top-n 40` knocks gated Sharpe 0.70 → 0.64 and raw Sharpe 0.84
 → 0.81 — vol rises in both variants while CAGR is flat. Tightening to
 `--top-n 10 --weight pred` makes it worse (gated Sharpe 0.37, raw
-Sharpe 0.59). Concentration only pays off if the *within-basket
-ranking* carries signal; here it's mostly noise. The signal lives at
+Sharpe 0.59). Concentration only pays off if the _within-basket
+ranking_ carries signal; here it's mostly noise. The signal lives at
 "this basket of 40 beats the universe," not "stock #1 beats stock #40."
 Kept in the codebase as a knob to re-test against future models.
 
@@ -857,7 +856,7 @@ produced which number.
 | + XBRL fundamentals (raw, 500 trials)              | Point-in-time            | clip ±0.5 + date-demeaned | + 7 raw fundamentals (49 features)                                         | decile-spread, 500 trials, depth ∈ [3,6], LR ∈ [0.005,0.3], ES=100 | +15.1%     | +7.7%      | **Regressed.** Val IC ticked up (+0.0444 → +0.0563) but decile spread is flat (+0.0182, hard ceiling — top 10 trials all hit exactly 0.018162). `best_iteration=4`. 3 of 7 fundamentals absorbed (D/E rank 3rd at 0.082, ROA 6th at 0.075, E/P 10th at 0.046) but at the cost of zeroing 8 previously-active technicals (`vol_20d`, `ret_1d/5d/63d`, `trend_regime`, `zscore_*`). Fundamentals are _displacing_ signal, not adding to it. Rank-normalized version pending. |
 | + fundamentals + regime context (200 trials)       | Point-in-time            | clip ±0.5 + date-demeaned | + 7 fundamentals + 7 fund-ranks + 5 broadcast SPY/VIX regime (61 features) | decile-spread, 200 trials, depth ∈ [3,5], LR ∈ [0.005,0.3], ES=100 | +16.2%     | +9.0%      | Decile-spread ceiling broken (+0.0182 → +0.0235); val IC +0.0568 (best in clean arch). `best_iteration=2`, `learning_rate=0.261` — model wants few aggressive boosts. Ranking quality up but raw CAGR short of the +17.5% earnings-only headline.                                                                                                                                                                                                                          |
 | **+ 5-seed stability-selection prune (50 trials)** | Point-in-time            | clip ±0.5 + date-demeaned | 40 features (61 minus 19 dead-in-all-5-seeds + 2 dead-rank-only)           | decile-spread, 50 trials, depth ∈ [3,5], LR ∈ [0.005,0.3], ES=100  | **+19.0%** | **+10.2%** | **First Sharpe > SPY (0.76 vs 0.75).** `best_iteration=43, learning_rate=0.0058` — the cleaner feature set unlocked a slow-build basin the 61-feature config couldn't find (was stuck at lr~0.26 / 2 trees). Val decile spread +0.0193, val IC +0.0417 (lower than 61-feature run, but test CAGR up). Saved as `xgb_v1_stability_pruned.json`.                                                                                                                             |
-| **+ Form 4 insider transactions (50 trials)**      | Point-in-time            | clip ±0.5 + date-demeaned | 44 features (40 + 4 insider: buy/sell counts, net dollar, days-since-buy)  | decile-spread, 50 trials, depth ∈ [3,5], LR ∈ [0.005,0.3], ES=100  | **+21.0%** | **+12.0%** | **Sharpe 0.81 vs SPY 0.75 (gap widens from +0.01 to +0.06).** All 4 insider features earn non-zero importance — `insider_buy_count_60d` rank 25/45, `insider_sell_count_60d` weakest at 39/45 (matches 10b5-1-plan-noise literature). `best_iteration=13, learning_rate=0.0051`. MaxDD widens -25.8% → -31.7% (Calmar 0.74 → 0.66) — expected cost of higher CAGR. Bulk-TSV pipeline replaces a per-XML scraper that got the source IP throttled. Saved as `xgb_v1.json`. |
+| **+ Form 4 insider transactions (50 trials)**      | Point-in-time            | clip ±0.5 + date-demeaned | 44 features (40 + 4 insider: buy/sell counts, net dollar, days-since-buy)  | decile-spread, 50 trials, depth ∈ [3,5], LR ∈ [0.005,0.3], ES=100  | **+21.0%** | **+12.0%** | **Sharpe 0.81 vs SPY 0.75 (gap widens from +0.01 to +0.06).** All 4 insider features earn non-zero importance — `insider_buy_count_60d` rank 25/45, `insider_sell_count_60d` weakest at 39/45 (matches 10b5-1-plan-noise literature). `best_iteration=13, learning_rate=0.0051`. MaxDD widens -25.8% → -31.7% (Calmar 0.74 → 0.66) — expected cost of higher CAGR. Bulk-TSV pipeline replaces a per-XML scraper that got the source IP throttled. Saved as `xgb_v1.json`.  |
 
 Four things to take away:
 
@@ -1069,6 +1068,7 @@ for further alpha.
 > Sharpe 0.81** (Sharpe gap over SPY widens to +0.06).
 >
 > **Queued (free, in priority order):**
+>
 > 1. **§7 8-K item 2.02 announcement dates** — ✅ **shipped** (data path).
 >    `earnings.py` now caches 8-K filings and filters to item 2.02 via the
 >    submissions JSON's parallel `items` array (zero extra requests vs the
@@ -1109,7 +1109,7 @@ for further alpha.
 >    `|daily_return| / dollar_volume`, plus its cross-sectional rank. No new
 >    data download (computed from existing OHLCV); full 2007+ coverage.
 >    Documented illiquidity premium (Amihud 2002).
-> 6. **§11 Quality factors** (~½ day) — gross profitability (Novy-Marx 2013),
+> 7. **§11 Quality factors** (~½ day) — gross profitability (Novy-Marx 2013),
 >    accruals (Sloan 1996), asset growth (Cooper 2008) via the existing
 >    `fundamentals.py` XBRL pipeline. Same NaN profile as current 7
 >    fundamentals (2009-06 partial, 2011-06 full). Fills the biggest gap in
@@ -1184,6 +1184,7 @@ does ~80 quarter-zip GETs total (one per quarter back to 2006q1) and
 finishes in minutes.
 
 Features:
+
 - `insider_buy_count_60d`, `insider_sell_count_60d` — counts of direct
   open-market officer transactions in the last 60 calendar days
 - `insider_net_dollar_60d` — signed dollar volume (P − S); positive = net
@@ -1396,11 +1397,11 @@ Shipped as **Bucket 2c — broadcast FRED macro regime context** (see the
 feature section above for definitions and empirical lift). Three series
 made it into the model:
 
-| Shipped name        | FRED ID  | Description                                          |
-| ------------------- | -------- | ---------------------------------------------------- |
-| `term_spread_10y3m` | `DGS10 − DGS3MO` | Yield-curve regime / NY Fed recession indicator |
-| `ig_credit_spread`  | `BAA10Y` | Moody's Baa minus 10y Treasury (IG credit stress)   |
-| `inflation_5y5y`    | `T5YIFR` | 5-Year 5-Year Forward Inflation Expectation         |
+| Shipped name        | FRED ID          | Description                                       |
+| ------------------- | ---------------- | ------------------------------------------------- |
+| `term_spread_10y3m` | `DGS10 − DGS3MO` | Yield-curve regime / NY Fed recession indicator   |
+| `ig_credit_spread`  | `BAA10Y`         | Moody's Baa minus 10y Treasury (IG credit stress) |
+| `inflation_5y5y`    | `T5YIFR`         | 5-Year 5-Year Forward Inflation Expectation       |
 
 **HY OAS (`BAMLH0A0HYM2`) was scoped out** — FRED's free CSV now
 truncates every ICE BofA series to 2023→ (full history is gated behind
@@ -1439,11 +1440,11 @@ Three well-documented academic quality factors not in your current 7 fundamental
 
 **Factors and rationale.**
 
-| Factor                  | Formula                                            | Reference        | Sign                |
-| ----------------------- | -------------------------------------------------- | ---------------- | ------------------- |
-| `gross_profitability`   | (TTM Revenue − TTM COGS) / MRQ Total Assets        | Novy-Marx 2013   | + (the other value) |
-| `accruals`              | (ΔWC − Depreciation) / avg(MRQ Assets)             | Sloan 1996       | − (high → poor fwd) |
-| `asset_growth`          | MRQ Assets / MRQ Assets 4Q ago − 1                 | Cooper 2008      | −                   |
+| Factor                | Formula                                     | Reference      | Sign                |
+| --------------------- | ------------------------------------------- | -------------- | ------------------- |
+| `gross_profitability` | (TTM Revenue − TTM COGS) / MRQ Total Assets | Novy-Marx 2013 | + (the other value) |
+| `accruals`            | (ΔWC − Depreciation) / avg(MRQ Assets)      | Sloan 1996     | − (high → poor fwd) |
+| `asset_growth`        | MRQ Assets / MRQ Assets 4Q ago − 1          | Cooper 2008    | −                   |
 
 Where `WC = current_assets − current_liabilities` (already pulled as `mrq_assets_current` − `mrq_liabilities_current`).
 
@@ -1497,19 +1498,19 @@ Where `WC = current_assets − current_liabilities` (already pulled as `mrq_asse
 - [ ] feature: 13F institutional ownership from SEC EDGAR (~1-2 days) — quarterly Schedule 13F filings via EDGAR bulk data, same shape as insider pipeline. Candidate features: top-N largest holder count, ownership concentration (HHI on holdings), net fund buying in last quarter. Smart-money flow signal.
 - [ ] feature: FRED macro broadcast (~½ day) — `T10Y3M` (10y/3m term spread, 1982+) and `BAMLH0A0HYM2` (HY OAS, 1996+) via free FRED API. Both have full 2007 floor coverage. Broadcast regime context that interacts with cross-section, same shape as `vix_level` / `spy_rsi_14`. See [§9](#9-fred-macro-broadcast-features-free--day).
 - [ ] feature: extended recession-probability suite (~1 day) — broadcast regime block beyond §9, designed to interact with cross-section under stress. All free; all earliest dates predate the 2007 train floor.
-  - **FRED series** (free API via `fredapi` / `pandas-datareader`):
-    - `RECPROUSM156N` — NY Fed monthly P(US recession in 12 months), derived from the yield curve. 1959+. Cleanest single pre-computed predictor — model gets a probability instead of having to learn the inversion shape itself.
-    - `T10Y2Y` — 10Y minus 2Y Treasury, popular alternative to §9's `T10Y3M`. 1976+. A/B-test against T10Y3M to see which inversion definition the cross-section reacts to.
-    - `SAHMCURRENT` — Sahm rule (3-month avg unemployment minus prior-12-month low; ≥ 0.5pp = real-time recession trigger). 1948+. Labor-market signal independent of yield curve.
-    - `CFNAI` — Chicago Fed National Activity Index, 85-indicator composite. < −0.7 historically marks recessions. 1967+.
-    - `USSLIND` — Philly Fed Leading Index for the United States. Forward-looking diffusion. 1982+.
-    - `USALOLITONOSTSAM` — OECD Composite Leading Indicator for the US. 1955+. Mirrors CFNAI with a different basket — useful for diversification.
-    - `ICSA` — Initial unemployment claims (weekly); take 4-week moving average. 1967+. High-frequency labor signal.
-  - **Non-FRED nowcasts** (free, JSON, lower priority — require daily scraping):
-    - Atlanta Fed GDPNow — `atlantafed.org/cqer/research/gdpnow` (live GDP estimate).
-    - NY Fed Staff Nowcast — `newyorkfed.org/research/policy/nowcast` (similar real-time GDP nowcast).
-  - **Reference only — never a feature**: `USREC` (NBER official recession indicator, retrospective binary). Use for attribution / per-regime backtest slicing only; using it as a feature is a look-ahead violation since NBER dates recessions in arrears.
-  - **Watch for redundancy.** `RECPROUSM156N` is itself derived from the yield curve, so its signal partially overlaps `T10Y3M`. Hope is that stress measures from different domains (rates → labor → leading composites) capture distinct cross-section interactions; prune via stability sweep after wiring.
+    - **FRED series** (free API via `fredapi` / `pandas-datareader`):
+        - `RECPROUSM156N` — NY Fed monthly P(US recession in 12 months), derived from the yield curve. 1959+. Cleanest single pre-computed predictor — model gets a probability instead of having to learn the inversion shape itself.
+        - `T10Y2Y` — 10Y minus 2Y Treasury, popular alternative to §9's `T10Y3M`. 1976+. A/B-test against T10Y3M to see which inversion definition the cross-section reacts to.
+        - `SAHMCURRENT` — Sahm rule (3-month avg unemployment minus prior-12-month low; ≥ 0.5pp = real-time recession trigger). 1948+. Labor-market signal independent of yield curve.
+        - `CFNAI` — Chicago Fed National Activity Index, 85-indicator composite. < −0.7 historically marks recessions. 1967+.
+        - `USSLIND` — Philly Fed Leading Index for the United States. Forward-looking diffusion. 1982+.
+        - `USALOLITONOSTSAM` — OECD Composite Leading Indicator for the US. 1955+. Mirrors CFNAI with a different basket — useful for diversification.
+        - `ICSA` — Initial unemployment claims (weekly); take 4-week moving average. 1967+. High-frequency labor signal.
+    - **Non-FRED nowcasts** (free, JSON, lower priority — require daily scraping):
+        - Atlanta Fed GDPNow — `atlantafed.org/cqer/research/gdpnow` (live GDP estimate).
+        - NY Fed Staff Nowcast — `newyorkfed.org/research/policy/nowcast` (similar real-time GDP nowcast).
+    - **Reference only — never a feature**: `USREC` (NBER official recession indicator, retrospective binary). Use for attribution / per-regime backtest slicing only; using it as a feature is a look-ahead violation since NBER dates recessions in arrears.
+    - **Watch for redundancy.** `RECPROUSM156N` is itself derived from the yield curve, so its signal partially overlaps `T10Y3M`. Hope is that stress measures from different domains (rates → labor → leading composites) capture distinct cross-section interactions; prune via stability sweep after wiring.
 - [ ] feature: Amihud illiquidity (free, ~1 hour) — rolling 21d mean of `|daily_return| / dollar_volume`, plus cross-sectional rank. Computed from existing OHLCV; full 2007+ coverage. Documented illiquidity premium (Amihud 2002). See [§10](#10-amihud-illiquidity-free-1-hour).
 - [ ] feature: quality factors — gross profitability (Novy-Marx 2013), accruals (Sloan 1996), asset growth (Cooper 2008) (~½ day) via existing XBRL pipeline. New XBRL tags needed: COGS, depreciation, 4Q-lagged assets. Same NaN profile as existing fundamentals. See [§11](#11-quality-factors--gross-profitability-accruals-asset-growth-free--day).
 - [ ] re-run null test on the clean-architecture model (current null-test table is stale)
@@ -1522,3 +1523,4 @@ claude --resume b63b90f4-923f-419f-b30e-00cd9006952f
 claude --resume 7762f7ea-721e-4179-a24b-273d86c65f0e
 claude --resume 94d5520c-9a4b-460f-9e6d-b16cc80211b4
 claude --resume df27d2b6-5402-4381-89c2-89a7b3fb0d76 (insider)
+claude --resume 14ebc2c2-fe20-4ae5-8fc9-32d10b7ca9d6 (macro)
