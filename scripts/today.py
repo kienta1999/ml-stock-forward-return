@@ -2,9 +2,10 @@
 """Generate today's portfolio picks from the trained model.
 
 Bridges from backtest research to live trading. Predicts on the most recent
-date with valid features (label not required — we don't yet know the realised
-forward return), applies the same regime gate as the backtest, and emits the
-top-N tickers (or "CASH").
+date with valid features (label not required — we don't yet know the
+realised forward return), applies the same vol-target sizing overlay as
+the backtest, and emits the top-N tickers with deployment weights scaled
+by the recommended exposure (remainder = cash bucket).
 
 Daily workflow:
     uv run python scripts/data.py        # incremental refresh
@@ -20,12 +21,13 @@ also means `labels.py` does not need to be re-run for today's picks.
 CLI:
     uv run python scripts/today.py
     uv run python scripts/today.py --top-n 25
-    uv run python scripts/today.py --no-overlay
+    uv run python scripts/today.py --vol-target 0.15   # more conservative sizing
+    uv run python scripts/today.py --no-overlay        # ignore vol-target (always 100%)
     uv run python scripts/today.py --diff picks/picks_2026-04-28.csv
 
 Outputs:
-    stdout: regime status + top-N tickers with predicted returns
-    picks/picks_<latest_date>.csv: machine-readable picks for downstream automation
+    stdout: SPY 20d vol + recommended exposure + top-N tickers with deploy weights
+    picks/picks_<latest_date>.csv: machine-readable picks (weights already scaled)
 """
 
 import argparse
@@ -73,17 +75,18 @@ def predict_today(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _print_regime(market_row: pd.Series, vix_threshold: float) -> bool:
-    """Print regime status, return go_long verdict."""
-    go_long = strategy.regime_long_row(market_row, vix_threshold)
-    print("\nRegime status:")
-    print(f"  SPY close:     ${float(market_row['spy_close']):.2f}")
-    print(f"  SPY SMA200:    ${float(market_row['spy_sma200']):.2f}")
-    print(f"  SPY > SMA200:  {bool(market_row['spy_close'] > market_row['spy_sma200'])}")
-    print(f"  VIX close:     {float(market_row['vix_close']):.2f}")
-    print(f"  VIX < {vix_threshold:.0f}:      {bool(market_row['vix_close'] < vix_threshold)}")
-    print(f"  Go long?       {go_long}")
-    return go_long
+def _print_vol_regime(market_row: pd.Series, vol_target: float) -> float:
+    """Print vol-target sizing status. Returns recommended exposure ∈ [0, 1]."""
+    spy_vol = float(market_row["spy_vol_20d"])
+    exposure = strategy.vol_target_exposure(spy_vol, vol_target)
+    label = "full long" if exposure >= 0.99 else f"scaled down ({(1 - exposure):.0%} cash)"
+    print("\nVol regime (sizing overlay):")
+    print(f"  SPY close:           ${float(market_row['spy_close']):.2f}")
+    print(f"  VIX close:           {float(market_row['vix_close']):.2f}  (informational only)")
+    print(f"  SPY 20d realized vol: {spy_vol:.2%}")
+    print(f"  Target vol:          {vol_target:.2%}")
+    print(f"  → Recommended exposure: {exposure:.1%}  ({label})")
+    return exposure
 
 
 def _print_picks(picks_df: pd.DataFrame, latest_date: pd.Timestamp, top_n: int) -> None:
@@ -118,11 +121,21 @@ def _print_diff(picks_df: pd.DataFrame, prev: pd.DataFrame, prev_label: str) -> 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--top-n", type=int, default=strategy.TOP_N)
-    ap.add_argument("--vix-threshold", type=float, default=strategy.VIX_THRESHOLD)
+    ap.add_argument(
+        "--vol-target",
+        type=float,
+        default=strategy.DEFAULT_VOL_TARGET,
+        help=(
+            "Target portfolio vol (annualized) for the sizing overlay "
+            f"(default {strategy.DEFAULT_VOL_TARGET}). Exposure = "
+            "min(1.0, vol_target / spy_vol_20d); picks weights are scaled "
+            "by this exposure and the remainder is implicitly cash."
+        ),
+    )
     ap.add_argument(
         "--no-overlay",
         action="store_true",
-        help="Skip regime gate; always pick top N.",
+        help="Skip vol-target overlay; always recommend 100% exposure.",
     )
     ap.add_argument(
         "--diff",
@@ -169,23 +182,35 @@ def main() -> None:
     market_data = load_market()
     market = strategy.prepare_market(market_data["SPY"], market_data["VIX"])
     latest_market_row = market.iloc[-1]
-    go_long = _print_regime(latest_market_row, args.vix_threshold)
 
-    if not args.no_overlay and not go_long:
-        print("\n=== STAY IN CASH ===")
+    if args.no_overlay:
+        exposure = 1.0
+        print("\n(--no-overlay): vol-target disabled — picks at 100% exposure.")
+    else:
+        exposure = _print_vol_regime(latest_market_row, args.vol_target)
+
+    if exposure <= 0:
+        # Defensive: vol_target_exposure clamps at [0, 1] and only returns 0
+        # when vol_target itself is 0. Treat as full cash.
+        print("\n=== STAY IN CASH (exposure = 0) ===")
         picks_df = pd.DataFrame(columns=["ticker", "predicted_return", "weight"])
     else:
-        if args.no_overlay and not go_long:
-            print(
-                f"\n(--no-overlay): regime would say cash; "
-                f"ignoring and picking top {args.top_n}"
-            )
         top = strategy.top_picks(today, args.top_n)[
             ["ticker", "predicted_return"]
         ].copy().reset_index(drop=True)
-        weights = strategy.compute_weights(top, args.weight)
-        top["weight"] = top["ticker"].map(weights)
+        pick_weights = strategy.compute_weights(top, args.weight)
+        # Scale every basket weight by the recommended exposure; the
+        # implicit (1 - exposure) is cash. CSV reflects the actual
+        # deployment, not the renormalized basket.
+        top["weight"] = top["ticker"].map(
+            lambda t: pick_weights.get(t, 0.0) * exposure
+        )
         picks_df = top
+        if exposure < 0.99:
+            print(
+                f"  Weights below scaled by exposure {exposure:.2f}; "
+                f"basket sums to {exposure:.2%}, cash bucket = {1 - exposure:.2%}."
+            )
         _print_picks(picks_df, latest_date, args.top_n)
 
     os.makedirs(PICKS_DIR, exist_ok=True)

@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """Backtest the trained ranker on the test set (2021→).
 
-Strategy (v1, long-only):
+Strategy (v1, long-only with vol-targeted sizing):
     Every 21 trading days:
-        if SPY_close > SPY_SMA200 and VIX_close < 25:
-            portfolio = top 50 stocks by predicted forward return, equal-weight
-        else:
-            portfolio = cash
+        exposure = min(1.0, vol_target / spy_realized_vol_20d)
+        portfolio = top 40 stocks by predicted return, weighted to sum to
+                    `exposure` (remaining 1-exposure sits in cash returning 0)
     Hold each lot 21 trading days, then rebalance.
+
+The vol-target overlay (default 0.20) replaces the legacy binary VIX/SMA200
+gate. It scales gross exposure continuously: full long in calm regimes,
+ramping down as SPY's realized vol climbs above target. In 2008-style
+stress (SPY vol ~45%), exposure drops to ~44% — keeps the cross-sectional
+alpha while bounding drawdown by the long-only floor.
 
 Rebalance-date robustness:
     The above is run 21 times, each starting on a different anchor day
@@ -17,22 +22,22 @@ Rebalance-date robustness:
 
 Variants reported:
     1. SPY buy-and-hold (benchmark)
-    2. Long-only, regime gate ON  (the actual proposed strategy)
-    3. Long-only, regime gate OFF (diagnostic — raw stock-picking, no timing)
+    2. Long-only + vol-target overlay (the proposed strategy)
+    3. Long-only, raw / no overlay (diagnostic — always 100% exposed)
 
 Costs: 5 bps per side on rebalance turnover.
 Execution: trade at close of rebalance day (assumes MOC orders work).
 
 Outputs:
     reports/backtest_equity.png   — equity curves vs SPY
-    reports/backtest_stats.json   — CAGR / Sharpe / Max DD / time-in-market
+    reports/backtest_stats.json   — CAGR / Sharpe / Max DD / avg exposure
     reports/backtest_equity.csv   — daily NAV per variant (mean across offsets)
 
 CLI:
     uv run python scripts/backtest.py
-    uv run python scripts/backtest.py --no-overlay     # gated variant off
-    uv run python scripts/backtest.py --top-n 25       # tighter pick
-    uv run python scripts/backtest.py --vix-threshold 30
+    uv run python scripts/backtest.py --no-overlay        # vol-target variant off
+    uv run python scripts/backtest.py --top-n 25          # tighter pick
+    uv run python scripts/backtest.py --vol-target 0.15   # more aggressive de-risk
 """
 
 import argparse
@@ -92,24 +97,30 @@ def run_one_offset(
     test_dates: list[pd.Timestamp],
     offset: int,
     *,
-    regime_gate: bool,
+    vol_target_on: bool,
     top_n: int,
     hold_days: int,
     cost_per_side: float,
-    vix_threshold: float,
+    vol_target: float,
     weight_mode: str,
-) -> tuple[pd.Series, pd.Series, pd.Series]:
+) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
     """Single backtest with rebalances on day `offset`, `offset+hold_days`, ....
 
-    Returns (equity, in_market, holdings). `holdings` is a Series of
-    comma-separated ticker strings (or "" when in cash) — useful for auditing
-    what the strategy actually held on each day.
+    Returns (equity, in_market, holdings, exposure_series).
+
+    `vol_target_on=True` enables the vol-target overlay (default "gated"
+    behavior): exposure = min(1.0, vol_target / spy_vol_20d) at each
+    rebalance. `vol_target_on=False` is the raw variant — always 100%
+    exposed. `holdings` is comma-separated tickers (or "" when fully in
+    cash) for the auditing CSV.
     """
     weights: dict[str, float] = {}
     equity = 1.0
     equity_curve: dict[pd.Timestamp, float] = {}
     in_market: dict[pd.Timestamp, bool] = {}
     holdings: dict[pd.Timestamp, str] = {}
+    exposure_curve: dict[pd.Timestamp, float] = {}
+    current_exposure = 0.0
 
     for i, date in enumerate(test_dates):
         # 1. Apply today's return to current weights.
@@ -122,17 +133,18 @@ def run_one_offset(
         # 2. Rebalance day?
         is_rebalance = (i >= offset) and ((i - offset) % hold_days == 0)
         if is_rebalance:
-            go_long = True
-            if regime_gate:
-                if date in market.index:
-                    go_long = strategy.regime_long_row(market.loc[date], vix_threshold)
-                else:
-                    go_long = False
+            # Vol-target exposure ∈ [0, 1]; raw variant pins to 1.0.
+            if vol_target_on and date in market.index:
+                spy_vol = market.loc[date, "spy_vol_20d"]
+                exposure = strategy.vol_target_exposure(spy_vol, vol_target)
+            else:
+                exposure = 1.0
 
-            if go_long and date in by_date:
+            if exposure > 0 and date in by_date:
                 day = by_date[date]
                 top = strategy.top_picks(day, top_n)
-                new_weights = strategy.compute_weights(top, weight_mode)
+                pick_weights = strategy.compute_weights(top, weight_mode)
+                new_weights = {t: w * exposure for t, w in pick_weights.items()}
             else:
                 new_weights = {}
 
@@ -142,15 +154,18 @@ def run_one_offset(
             )
             equity *= 1.0 - turnover * cost_per_side
             weights = new_weights
+            current_exposure = exposure
 
         equity_curve[date] = equity
         in_market[date] = bool(weights)
         holdings[date] = ",".join(sorted(weights.keys())) if weights else ""
+        exposure_curve[date] = current_exposure
 
     return (
         pd.Series(equity_curve, name="equity"),
         pd.Series(in_market, name="in_market"),
         pd.Series(holdings, name="holdings"),
+        pd.Series(exposure_curve, name="exposure"),
     )
 
 
@@ -158,19 +173,19 @@ def run_shifted_starts(
     test_panel: pd.DataFrame,
     market: pd.DataFrame,
     *,
-    regime_gate: bool,
+    vol_target_on: bool,
     top_n: int,
     hold_days: int,
     cost_per_side: float,
-    vix_threshold: float,
+    vol_target: float,
     weight_mode: str,
-) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
+) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series]:
     """Run `hold_days` backtests at different rebalance offsets.
 
-    Returns (equity_df, time_in_market_per_offset, holdings_offset_0).
-    equity_df is wide: rows=date, columns=offset. holdings_offset_0 is the
-    daily holdings (comma-separated tickers) for offset=0 only — one
-    representative pick log, kept tractable to write to CSV.
+    Returns (equity_df, time_in_market_per_offset, holdings_offset_0,
+    avg_exposure_per_offset). equity_df is wide: rows=date, columns=offset.
+    holdings_offset_0 is the daily holdings (comma-separated tickers) for
+    offset=0 only — one representative pick log, tractable to write to CSV.
     """
     test_dates = sorted(test_panel["date"].unique())
     by_date = {
@@ -180,16 +195,18 @@ def run_shifted_starts(
 
     curves: dict[int, pd.Series] = {}
     tim: dict[int, float] = {}
+    avg_exp: dict[int, float] = {}
     holdings_offset_0: pd.Series | None = None
     for offset in range(hold_days):
-        eq, inm, hold = run_one_offset(
+        eq, inm, hold, exp = run_one_offset(
             by_date, market, test_dates, offset,
-            regime_gate=regime_gate, top_n=top_n, hold_days=hold_days,
-            cost_per_side=cost_per_side, vix_threshold=vix_threshold,
+            vol_target_on=vol_target_on, top_n=top_n, hold_days=hold_days,
+            cost_per_side=cost_per_side, vol_target=vol_target,
             weight_mode=weight_mode,
         )
         curves[offset] = eq
         tim[offset] = float(inm.mean())
+        avg_exp[offset] = float(exp.mean())
         if offset == 0:
             holdings_offset_0 = hold
 
@@ -197,6 +214,7 @@ def run_shifted_starts(
         pd.DataFrame(curves).sort_index(),
         pd.Series(tim, name="time_in_market"),
         holdings_offset_0,
+        pd.Series(avg_exp, name="avg_exposure"),
     )
 
 
@@ -295,9 +313,15 @@ def main() -> None:
     ap.add_argument("--hold-days", type=int, default=strategy.HOLD_DAYS)
     ap.add_argument("--cost-bps", type=float, default=strategy.COST_PER_SIDE * 1e4,
                     help="Cost per side in basis points (default 5).")
-    ap.add_argument("--vix-threshold", type=float, default=strategy.VIX_THRESHOLD)
+    ap.add_argument("--vol-target", type=float, default=strategy.DEFAULT_VOL_TARGET,
+                    help=(
+                        "Target portfolio vol (annualized) for the overlay "
+                        f"(default {strategy.DEFAULT_VOL_TARGET}). Exposure = "
+                        "min(1.0, vol_target / spy_vol_20d). Lower = more "
+                        "aggressive de-risking in stressed regimes."
+                    ))
     ap.add_argument("--no-overlay", action="store_true",
-                    help="Skip the gated variant (only run raw long-only + SPY).")
+                    help="Skip the vol-target variant (only run raw long-only + SPY).")
     ap.add_argument(
         "--weight",
         choices=strategy.WEIGHT_MODES,
@@ -325,23 +349,24 @@ def main() -> None:
     gated_curves: pd.DataFrame | None = None
     gated_tim: pd.Series | None = None
     gated_holdings: pd.Series | None = None
+    gated_avg_exp: pd.Series | None = None
     if not args.no_overlay:
-        print(f"Running long-only WITH regime gate "
-              f"(SPY>SMA200 AND VIX<{args.vix_threshold}, {args.hold_days} offsets, "
+        print(f"Running long-only WITH vol-target overlay "
+              f"(target={args.vol_target:.2f}, {args.hold_days} offsets, "
               f"weight={args.weight})...")
-        gated_curves, gated_tim, gated_holdings = run_shifted_starts(
+        gated_curves, gated_tim, gated_holdings, gated_avg_exp = run_shifted_starts(
             test_panel, market,
-            regime_gate=True, top_n=args.top_n, hold_days=args.hold_days,
-            cost_per_side=cost_per_side, vix_threshold=args.vix_threshold,
+            vol_target_on=True, top_n=args.top_n, hold_days=args.hold_days,
+            cost_per_side=cost_per_side, vol_target=args.vol_target,
             weight_mode=args.weight,
         )
 
-    print(f"Running long-only WITHOUT regime gate ({args.hold_days} offsets, "
+    print(f"Running long-only RAW / no overlay ({args.hold_days} offsets, "
           f"weight={args.weight})...")
-    raw_curves, _, raw_holdings = run_shifted_starts(
+    raw_curves, _, raw_holdings, _ = run_shifted_starts(
         test_panel, market,
-        regime_gate=False, top_n=args.top_n, hold_days=args.hold_days,
-        cost_per_side=cost_per_side, vix_threshold=args.vix_threshold,
+        vol_target_on=False, top_n=args.top_n, hold_days=args.hold_days,
+        cost_per_side=cost_per_side, vol_target=args.vol_target,
         weight_mode=args.weight,
     )
 
@@ -361,6 +386,8 @@ def main() -> None:
         gated_mean = gated_curves.mean(axis=1)
         s = compute_stats(gated_mean)
         s["avg_time_in_market"] = float(gated_tim.mean())
+        s["avg_exposure"] = float(gated_avg_exp.mean())
+        s["vol_target"] = float(args.vol_target)
         per_offset_cagrs = [
             compute_stats(gated_curves[c])["cagr"] for c in gated_curves.columns
         ]
@@ -403,11 +430,12 @@ def main() -> None:
     print("\nBacktest summary:")
     if "gated_long_only" in stats:
         s = stats["gated_long_only"]
-        extra = (f"  TIM={s['avg_time_in_market']:.0%}  "
+        extra = (f"  AvgExp={s['avg_exposure']:.0%}  "
+                 f"VolTgt={s['vol_target']:.2f}  "
                  f"CAGR offset range=[{s['offset_cagr_min']:+.2%}, "
                  f"{s['offset_cagr_max']:+.2%}]")
-        _print_stats("gated long-only (regime ON)", s, extra)
-    _print_stats("raw long-only (regime OFF)", stats["raw_long_only"])
+        _print_stats(f"vol-targeted long-only (tgt={s['vol_target']:.2f})", s, extra)
+    _print_stats("raw long-only (no overlay)", stats["raw_long_only"])
     _print_stats(
         f"SPY buy & hold (clipped @{strategy_end.date()})",
         stats["spy_buy_hold"],

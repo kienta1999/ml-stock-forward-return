@@ -2,7 +2,8 @@
 
 ML-based S&P 500 stock ranker. Predict each stock's forward 21-trading-day
 return independently with XGBoost, sort to get a daily ranking, long the top
-decile, hold 21 trading days, rebalance monthly with a SPY/VIX regime gate.
+decile, hold 21 trading days, rebalance monthly with a **vol-targeted
+sizing overlay** (replaces the legacy SPY/VIX regime gate as of 2026-05-11).
 
 **Current status (+ Form 4 insider transactions, 500-trial sweep on
 44 features):** raw long-only **+21.9% CAGR / Sharpe 0.86 vs SPY
@@ -73,7 +74,7 @@ filters and picks. Here we score and sort.
 | Label    | `forward_21d_return − date_mean(forward_21d_return)` — date-demeaned (cross-sectional excess). Raw `forward_21d_return` is clipped to ±0.5 first to cap dead-ticker outliers, then demeaned. The model can only learn within-date ordering, not market direction.                                                                                                                        |
 | Split    | Train 2007–2017, Val 2018–2020, Test 2021→. Chronological. No shuffling.                                                                                                                                                                                                                                                                                                                 |
 | Model    | XGBoost regressor, RMSE loss, optuna-tuned on val decile spread (max_depth ∈ [3, 6], 100 trials, ES=100 rounds)                                                                                                                                                                                                                                                                          |
-| Backtest | Long-only top-50, monthly rebalance, regime gate (SPY > SMA200 AND VIX < 25), 21 shifted-start offsets                                                                                                                                                                                                                                                                                   |
+| Backtest | Long-only top-40, monthly rebalance, vol-targeted sizing overlay (`exposure = min(1.0, 0.20 / spy_vol_20d)`), 21 shifted-start offsets                                                                                                                                                                                                                                                                                   |
 | Costs    | 5 bps per side on rebalance turnover                                                                                                                                                                                                                                                                                                                                                     |
 
 Every feature on row date=D uses only data observable at the close of D.
@@ -154,14 +155,16 @@ uv run python scripts/train.py --trials 20          # faster tune
 uv run python scripts/train.py --quick              # skip tuning, use sane defaults
 uv run python scripts/train.py --quick --seed 3     # vary RNG (XGBoost + optuna) for stability-selection sweeps
 
-uv run python scripts/backtest.py                    # long-only + gated, 21 shifted starts (~1 min)
-uv run python scripts/backtest.py --no-overlay       # skip gated variant
+uv run python scripts/backtest.py                    # long-only raw + vol-targeted overlay, 21 shifted starts (~1 min)
+uv run python scripts/backtest.py --no-overlay       # skip vol-target variant (raw only)
 uv run python scripts/backtest.py --top-n 25         # tighter pick (default 40)
+uv run python scripts/backtest.py --vol-target 0.15  # more aggressive de-risk (default 0.20)
 uv run python scripts/backtest.py --weight pred      # weight basket by predicted_return (default: equal); see "Basket weighting" below
 
-uv run python scripts/today.py                                   # latest-date picks (regime gate + top 40)
+uv run python scripts/today.py                                   # latest-date picks (vol-target sizing + top 40)
 uv run python scripts/today.py --diff picks/picks_YYYY-MM-DD.csv # buy/sell list vs that prior file
-uv run python scripts/today.py --no-overlay                      # ignore regime gate (diagnostic)
+uv run python scripts/today.py --no-overlay                      # ignore vol-target (always 100% exposure)
+uv run python scripts/today.py --vol-target 0.15                 # more conservative sizing
 uv run python scripts/today.py --weight pred                     # pred-weighted basket (default: equal)
 
 uv run python scripts/run_all.py                  # 🚨 DAILY / CATCH-UP — universe → data → earnings → insider → fundamentals → features → labels → today (auto --diff). Run this when you come back after time away.
@@ -617,11 +620,49 @@ Top-40 by predicted return (= top ~8% of ~500 active S&P 500 names),
 equal-weighted, monthly rebalance, 21 trading day hold, 5 bps per side cost.
 Two variants run side-by-side:
 
-- **Raw** (default): always long top 40. The deployed strategy — see
-  "Why default top-40, raw" below for the rationale.
-- **Gated**: `if SPY_close > SPY_SMA200 AND VIX_close < 25 → top 40; else cash.`
-  Trend-up + low-vol regime filter, ~77% time in market. Kept as diagnostic
-  and as a fallback if you want to give up CAGR for shallower drawdowns.
+- **Raw** (default for "max return at full risk"): always long top 40, 100%
+  exposed. See "Why default top-40, raw" below for the rationale.
+- **Vol-targeted** (default for "shallower drawdowns"): scale gross exposure
+  continuously by `min(1.0, 0.20 / spy_vol_20d)`. In calm regimes (SPY 20d
+  vol ≤ 20%) → full long. As realized vol climbs, exposure ramps down: SPY
+  vol 30% → ~67% exposure, SPY vol 45% → ~44%. Remaining capital sits in
+  cash. Replaces the legacy `SPY > SMA200 AND VIX < 25` binary gate as of
+  2026-05-11 (see "Vol-target overlay" below).
+
+### Vol-target overlay (the new "gated" default)
+
+The legacy binary regime gate fired late — `VIX > 25` typically crosses
+after most of the damage has happened — and was rebalance-date sensitive
+because it was an on/off switch. Replaced with **continuous vol-target
+sizing**:
+
+```
+exposure_t = min(1.0, vol_target / spy_realized_vol_20d_t)     # vol_target default 0.20
+basket_weights_t = exposure_t * (1/N for each of the top-N picks)
+cash_bucket_t = 1 - exposure_t                                  # returns 0
+```
+
+Properties:
+
+- **No leverage** — exposure caps at 1.0. Only scales down, never up.
+- **Triggered at rebalance** — exposure is recomputed every 21 trading days,
+  not daily. Mid-hold vol spikes don't trigger an emergency sell; the
+  overlay reacts at the next scheduled rebalance. For live use,
+  `today.py` reads *today's* SPY vol, so daily reruns give a near-real-time
+  recommendation independent of the backtest cadence.
+- **Empirical 2008 stress test** (leave-2008-out walk-forward, train
+  2010-2019 / test 2007-2009): raw MaxDD -64.6%, raw CAGR +6.9% vs
+  SPY -5.7%. Vol-target overlay sized exposure down hard during Sep-Nov
+  2008. To re-run this experiment: see `dataset.py` constants and `TEST_END`.
+- **Empirical 2021-2026** (no real vol-bomb in this window): vol-target's
+  average exposure stayed ~95% — overlay barely activated because the 2022
+  bear was a slow grind, not a vol explosion. MaxDD improved ~2pts vs raw
+  at the cost of ~3 CAGR pts. The overlay's value shows up in genuine
+  vol-bomb regimes (2008, 2020), not slow grinds.
+
+VIX/SMA200 retired but reversible: `regime_long`/`regime_long_row` are
+preserved in `strategy.py`; uncomment the `spy_sma200` line in
+`prepare_market` to bring them back.
 
 ### Basket weighting
 
