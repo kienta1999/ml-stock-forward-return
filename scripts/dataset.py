@@ -50,12 +50,19 @@ _ROOT = os.path.dirname(_HERE)
 PANEL_PATH = os.path.join(_ROOT, "data", "processed", "panel.parquet")
 
 # data.py downloads from 2005-07-01 so 252d rolling features warm up by 2007-01-01.
-# Discard those buffer rows here — they exist only to seed the indicators.
+# PANEL_START is the earliest date with valid rolling features. Kept separate
+# from TRAIN_START so a pre-train OOS test slice (e.g. 2007-2009 for a 2008
+# stress test) can be carved out without losing rolling-warmup rows.
+PANEL_START = "2007-01-01"
 TRAIN_START = "2007-01-01"
 TRAIN_END = "2017-12-31"
 VAL_START = "2018-01-01"
 VAL_END = "2020-12-31"
 TEST_START = "2021-01-01"
+# TEST_END = None → run test through the latest available panel date
+# (production behavior). Set to "YYYY-MM-DD" to clip — used for the
+# leave-2008-out walk-forward stress test (test=2007-2009, train=2010-2019).
+TEST_END: str | None = None
 
 FEATURE_COLS: list[str] = ALL_FEATURES
 TARGET_COL: str = LABEL_COL
@@ -103,10 +110,10 @@ def load_panel(path: str = PANEL_PATH, drop_na: bool = True) -> pd.DataFrame:
 
     # Drop the 2005-07-01 → 2006-12-31 buffer rows that existed only to warm up rolling features.
     before = len(panel)
-    panel = panel[panel["date"] >= TRAIN_START].reset_index(drop=True)
+    panel = panel[panel["date"] >= PANEL_START].reset_index(drop=True)
     if len(panel) < before:
         print(
-            f"Trimmed {before - len(panel):,} pre-{TRAIN_START} buffer rows "
+            f"Trimmed {before - len(panel):,} pre-{PANEL_START} buffer rows "
             f"→ {len(panel):,} model-ready rows."
         )
 
@@ -114,10 +121,18 @@ def load_panel(path: str = PANEL_PATH, drop_na: bool = True) -> pd.DataFrame:
 
 
 def split(panel: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Chronological 3-way split. No shuffling."""
-    train = panel[panel["date"] <= TRAIN_END]
+    """Chronological 3-way split. No shuffling.
+
+    All three slices are bracketed by START/END so a leave-2008-out
+    config (test=2007-2009, sandwiched before train=2010-2019) doesn't
+    leak training rows into the test slice. `TEST_END = None` means
+    "run to the latest panel date" (the production behavior).
+    """
+    train = panel[(panel["date"] >= TRAIN_START) & (panel["date"] <= TRAIN_END)]
     val = panel[(panel["date"] >= VAL_START) & (panel["date"] <= VAL_END)]
     test = panel[panel["date"] >= TEST_START]
+    if TEST_END is not None:
+        test = test[test["date"] <= TEST_END]
     return (
         train.reset_index(drop=True),
         val.reset_index(drop=True),

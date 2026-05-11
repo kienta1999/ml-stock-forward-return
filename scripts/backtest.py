@@ -53,7 +53,7 @@ if _HERE not in sys.path:
 
 import strategy  # noqa: E402
 from data import load_market  # noqa: E402
-from dataset import TEST_START, load_panel  # noqa: E402
+from dataset import TEST_END, TEST_START, load_panel  # noqa: E402
 
 _ROOT = os.path.dirname(_HERE)
 MODEL_PATH = os.path.join(_ROOT, "models", "xgb_v1.json")
@@ -68,8 +68,16 @@ PERIODS_PER_YEAR = 252
 
 
 def predict_test(panel: pd.DataFrame, model_path: str) -> pd.DataFrame:
-    """Score the test slice with the saved xgb_v1 model."""
+    """Score the test slice with the saved xgb_v1 model.
+
+    Honors both TEST_START and TEST_END so a leave-2008-out config
+    (test = 2007-01 → 2009-12) doesn't accidentally pull train rows
+    (2010+) into the backtest. `TEST_END = None` runs through the
+    latest panel date (production behavior).
+    """
     test = panel[panel["date"] >= TEST_START]
+    if TEST_END is not None:
+        test = test[test["date"] <= TEST_END]
     return strategy.predict(test, strategy.load_model(model_path))
 
 
