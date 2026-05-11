@@ -156,10 +156,12 @@ uv run python scripts/train.py --quick --seed 3     # vary RNG (XGBoost + optuna
 uv run python scripts/backtest.py                    # long-only + gated, 21 shifted starts (~1 min)
 uv run python scripts/backtest.py --no-overlay       # skip gated variant
 uv run python scripts/backtest.py --top-n 25         # tighter pick (default 40)
+uv run python scripts/backtest.py --weight pred      # weight basket by predicted_return (default: equal); see "Basket weighting" below
 
 uv run python scripts/today.py                                   # latest-date picks (regime gate + top 40)
 uv run python scripts/today.py --diff picks/picks_YYYY-MM-DD.csv # buy/sell list vs that prior file
 uv run python scripts/today.py --no-overlay                      # ignore regime gate (diagnostic)
+uv run python scripts/today.py --weight pred                     # pred-weighted basket (default: equal)
 
 uv run python scripts/run_all.py                  # 🚨 DAILY / CATCH-UP — universe → data → earnings → insider → fundamentals → features → labels → today (auto --diff). Run this when you come back after time away.
 uv run python scripts/run_all.py --retrain        # also: train + backtest (use after a feature change)
@@ -580,6 +582,24 @@ Two variants run side-by-side:
 - **Gated**: `if SPY_close > SPY_SMA200 AND VIX_close < 25 → top 40; else cash.`
   Trend-up + low-vol regime filter, ~77% time in market. Kept as diagnostic
   and as a fallback if you want to give up CAGR for shallower drawdowns.
+
+### Basket weighting
+
+`--weight equal` (default) puts 1/N on every name in the basket. `--weight
+pred` weights proportional to `predicted_return` (negatives clipped at 0,
+falls back to equal if every pick is ≤0). Same flag works on both
+`backtest.py` and `today.py`; `today.py` writes the chosen weights into
+the `weight` column of `picks_<date>.csv`.
+
+**Empirically, pred-weight does not help** at the current model's signal
+strength. On the 2021→2026 test window, switching equal→pred at the
+default `--top-n 40` knocks gated Sharpe 0.70 → 0.64 and raw Sharpe 0.84
+→ 0.81 — vol rises in both variants while CAGR is flat. Tightening to
+`--top-n 10 --weight pred` makes it worse (gated Sharpe 0.37, raw
+Sharpe 0.59). Concentration only pays off if the *within-basket
+ranking* carries signal; here it's mostly noise. The signal lives at
+"this basket of 40 beats the universe," not "stock #1 beats stock #40."
+Kept in the codebase as a knob to re-test against future models.
 
 ### Rebalance-date sensitivity
 

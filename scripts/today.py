@@ -128,6 +128,16 @@ def main() -> None:
         "--diff",
         help="Path to a previous picks CSV to compute BUY/SELL/HOLD list against.",
     )
+    ap.add_argument(
+        "--weight",
+        choices=strategy.WEIGHT_MODES,
+        default=strategy.DEFAULT_WEIGHT_MODE,
+        help=(
+            "Basket weighting scheme. 'equal' (default) = 1/N. "
+            "'pred' = proportional to predicted_return (negatives clipped, "
+            "falls back to equal if all picks are ≤0)."
+        ),
+    )
     ap.add_argument("--model", default=MODEL_PATH)
     args = ap.parse_args()
 
@@ -173,7 +183,8 @@ def main() -> None:
         top = strategy.top_picks(today, args.top_n)[
             ["ticker", "predicted_return"]
         ].copy().reset_index(drop=True)
-        top["weight"] = 1.0 / args.top_n
+        weights = strategy.compute_weights(top, args.weight)
+        top["weight"] = top["ticker"].map(weights)
         picks_df = top
         _print_picks(picks_df, latest_date, args.top_n)
 

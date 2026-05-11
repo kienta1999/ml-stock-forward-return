@@ -89,6 +89,7 @@ def run_one_offset(
     hold_days: int,
     cost_per_side: float,
     vix_threshold: float,
+    weight_mode: str,
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
     """Single backtest with rebalances on day `offset`, `offset+hold_days`, ....
 
@@ -123,7 +124,7 @@ def run_one_offset(
             if go_long and date in by_date:
                 day = by_date[date]
                 top = strategy.top_picks(day, top_n)
-                new_weights = {t: 1.0 / top_n for t in top["ticker"]}
+                new_weights = strategy.compute_weights(top, weight_mode)
             else:
                 new_weights = {}
 
@@ -154,6 +155,7 @@ def run_shifted_starts(
     hold_days: int,
     cost_per_side: float,
     vix_threshold: float,
+    weight_mode: str,
 ) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
     """Run `hold_days` backtests at different rebalance offsets.
 
@@ -176,6 +178,7 @@ def run_shifted_starts(
             by_date, market, test_dates, offset,
             regime_gate=regime_gate, top_n=top_n, hold_days=hold_days,
             cost_per_side=cost_per_side, vix_threshold=vix_threshold,
+            weight_mode=weight_mode,
         )
         curves[offset] = eq
         tim[offset] = float(inm.mean())
@@ -287,6 +290,16 @@ def main() -> None:
     ap.add_argument("--vix-threshold", type=float, default=strategy.VIX_THRESHOLD)
     ap.add_argument("--no-overlay", action="store_true",
                     help="Skip the gated variant (only run raw long-only + SPY).")
+    ap.add_argument(
+        "--weight",
+        choices=strategy.WEIGHT_MODES,
+        default=strategy.DEFAULT_WEIGHT_MODE,
+        help=(
+            "Basket weighting scheme. 'equal' (default) = 1/N. "
+            "'pred' = proportional to predicted_return (negatives clipped, "
+            "falls back to equal if all picks are ≤0)."
+        ),
+    )
     ap.add_argument("--model", default=MODEL_PATH)
     args = ap.parse_args()
 
@@ -306,18 +319,22 @@ def main() -> None:
     gated_holdings: pd.Series | None = None
     if not args.no_overlay:
         print(f"Running long-only WITH regime gate "
-              f"(SPY>SMA200 AND VIX<{args.vix_threshold}, {args.hold_days} offsets)...")
+              f"(SPY>SMA200 AND VIX<{args.vix_threshold}, {args.hold_days} offsets, "
+              f"weight={args.weight})...")
         gated_curves, gated_tim, gated_holdings = run_shifted_starts(
             test_panel, market,
             regime_gate=True, top_n=args.top_n, hold_days=args.hold_days,
             cost_per_side=cost_per_side, vix_threshold=args.vix_threshold,
+            weight_mode=args.weight,
         )
 
-    print(f"Running long-only WITHOUT regime gate ({args.hold_days} offsets)...")
+    print(f"Running long-only WITHOUT regime gate ({args.hold_days} offsets, "
+          f"weight={args.weight})...")
     raw_curves, _, raw_holdings = run_shifted_starts(
         test_panel, market,
         regime_gate=False, top_n=args.top_n, hold_days=args.hold_days,
         cost_per_side=cost_per_side, vix_threshold=args.vix_threshold,
+        weight_mode=args.weight,
     )
 
     test_start = pd.Timestamp(test_panel["date"].min())

@@ -31,6 +31,9 @@ HOLD_DAYS = 21
 COST_PER_SIDE = 0.0005   # 5 bps
 VIX_THRESHOLD = 25.0
 
+WEIGHT_MODES = ("equal", "pred")
+DEFAULT_WEIGHT_MODE = "equal"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Model
@@ -105,6 +108,35 @@ def regime_long_row(
 def top_picks(day_panel: pd.DataFrame, top_n: int = TOP_N) -> pd.DataFrame:
     """Top-N rows by predicted_return on a single date's slice."""
     return day_panel.nlargest(top_n, "predicted_return")
+
+
+def compute_weights(
+    top: pd.DataFrame, mode: str = DEFAULT_WEIGHT_MODE
+) -> dict[str, float]:
+    """Map ticker → portfolio weight (sums to 1.0) for the given top picks.
+
+    Modes:
+        "equal" — 1/N across the basket.
+        "pred"  — proportional to predicted_return, with negatives clipped at
+                  zero. Falls back to equal-weight if every prediction in the
+                  basket is ≤0 (degenerate case where even the "top" picks are
+                  all bearish — e.g. an offset that lands on a stressed day).
+    """
+    tickers = top["ticker"].tolist()
+    n = len(tickers)
+    if n == 0:
+        return {}
+    if mode == "equal":
+        w = 1.0 / n
+        return {t: w for t in tickers}
+    if mode == "pred":
+        preds = top["predicted_return"].clip(lower=0.0)
+        total = float(preds.sum())
+        if total <= 0:
+            w = 1.0 / n
+            return {t: w for t in tickers}
+        return {t: float(p) / total for t, p in zip(tickers, preds)}
+    raise ValueError(f"unknown weight mode: {mode!r} (expected one of {WEIGHT_MODES})")
 
 
 def filter_valid_features(panel: pd.DataFrame) -> pd.DataFrame:
