@@ -69,7 +69,7 @@ filters and picks. Here we score and sort.
 | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Universe | Point-in-time S&P 500 (1996+ membership CSV) joined with current Wikipedia sectors                                                                                                                                                                                                                                                                                                       |
 | Data     | yfinance OHLCV 2005-07-01 → today (1.5y buffer for 252d warmup), per-ticker parquet cache, plus SPY + ^VIX                                                                                                                                                                                                                                                                               |
-| Features | 10 per-ticker technicals + 3 ticker-specific market-context + 3 broadcast SPY/VIX regime context + 1 sector-relative + 2 earnings calendar + 6 XBRL fundamentals + 14 cross-sectional ranks + sector cat = **40 total** (down from 61 after 5-seed stability-selection prune — 19 features were dead in all 5 seeds). See [Stability-selection prune](#stability-selection-prune) below. |
+| Features | 10 per-ticker technicals + 3 ticker-specific market-context + 3 broadcast SPY/VIX regime context + 3 broadcast FRED macro regime (term spread, IG credit spread, 5y5y inflation) + 1 sector-relative + 2 earnings calendar + 6 XBRL fundamentals + 14 cross-sectional ranks + 4 insider Form 4 + sector cat = **47 total** (after 5-seed stability-selection prune — see [Stability-selection prune](#stability-selection-prune)). |
 | Label    | `forward_21d_return − date_mean(forward_21d_return)` — date-demeaned (cross-sectional excess). Raw `forward_21d_return` is clipped to ±0.5 first to cap dead-ticker outliers, then demeaned. The model can only learn within-date ordering, not market direction.                                                                                                                        |
 | Split    | Train 2007–2017, Val 2018–2020, Test 2021→. Chronological. No shuffling.                                                                                                                                                                                                                                                                                                                 |
 | Model    | XGBoost regressor, RMSE loss, optuna-tuned on val decile spread (max_depth ∈ [3, 6], 100 trials, ES=100 rounds)                                                                                                                                                                                                                                                                          |
@@ -140,6 +140,7 @@ uv run python scripts/insider.py --refresh          # wipe data/insider/ and reb
 uv run python scripts/insider.py --tickers AAPL,MSFT  # rebuild only those tickers from already-cached zips
 uv run python scripts/fundamentals.py                # SEC EDGAR XBRL TTM income + MRQ balance sheet → per-ticker parquet (~10-15 min first time)
 uv run python scripts/fundamentals.py --smoke        # one-ticker dry-run before the full pull
+uv run python scripts/macro.py                       # FRED daily series → data/market/macro.parquet (~5s, no auth)
 # scripts/deprecated_short_interest.py is shipped but not wired — FINRA archive only goes back to 2018-08
 
 uv run python scripts/features.py --ticker AAPL     # smoke-print one ticker's features
@@ -336,6 +337,45 @@ val IC peak (+0.0568) and broke the prior decile-spread ceiling.
 | `spy_ret_21d`      | SPY trailing 21d return        | 0.034 (#14)                  |
 | `spy_trend_regime` | `1.0 if SPY > SMA200 else 0.0` | 0 (subsumed by `spy_rsi_14`) |
 | `vix_zscore_20d`   | `(vix − sma20) / std20`        | 0 (subsumed by `vix_level`)  |
+
+### Bucket 2c — broadcast FRED macro regime context (3)
+
+Added 2026-05-11. Same broadcast pattern as Bucket 2b — single value per
+date, identical across every ticker, earns reward only via interactions
+under date-demeaned labels. The point: VIX/SPY are both equity-derived;
+yield-curve and credit-spread signals capture macro stress those don't
+see. The 10y–3m term spread is the NY Fed's official recession predictor
+and inverted hard in 2019/2022/2023 within our test window.
+
+| Feature             | Definition                              | What it captures                                                                                                                |
+| ------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `term_spread_10y3m` | `DGS10 − DGS3MO` (% pts)                | Yield-curve regime. Inverts 6–18mo before postwar US recessions. Negative in 2019, 2022-23, the test window's macro stress.     |
+| `ig_credit_spread`  | `BAA10Y` — Moody's Baa minus 10y (% pts) | Investment-grade corporate credit stress. Spikes in risk-off (peaked 6.16 in March 2020). Equity-vol's debt-market counterpart. |
+| `inflation_5y5y`    | `T5YIFR` — 5-Year 5-Year Forward Inflation Expectation | Long-run inflation regime. Captures shifts VIX missed in 2022 — when realised inflation cracked but VIX stayed muted.           |
+
+**Data source.** FRED's free CSV endpoint (`fredgraph.csv?id=<series>`)
+— no API key. Cached to `data/market/macro.parquet`. ICE BofA HY OAS
+(`BAMLH0A0HYM2`) was originally on the wish-list but FRED now gates ICE
+series history behind an API key; BAA10Y is ~0.85 correlated with HY OAS
+and serves as the credit-stress proxy. See `scripts/macro.py` for the
+full caveat. The series are market-data (yields/spreads), not survey —
+no revision-lookahead concern, the FRED snapshot is what traders saw on
+each historical date.
+
+**Why these specifically.** Of the dozen candidate FRED macro series with
+≥2006 history, these 3 share two properties: (a) market-data, no
+publication-delay lookahead, and (b) cover stress axes the existing
+SPY/VIX regime features don't. Survey/composite series (NFCI, UNRATE,
+CFNAI, ICSA) were skipped because their revisions / publication delays
+introduce subtle lookahead that's not worth fixing for the marginal
+signal lift.
+
+**Empirical lift (47-feat `--quick`, single seed).** Adding these 3
+features lifted the raw long-only test backtest by **+1.47 CAGR pts**
+(21.79% → 23.26%) and **+0.03 Sharpe** (0.84 → 0.87), with max drawdown
+shallower by ~1pt (-29.59% → -28.66%). Single-seed result — multi-seed
+stability check pending. Likely larger DD benefit in a backtest that
+includes 2008-2009 (currently in train, hidden from test).
 
 ### Bucket 3 — sector-relative (2)
 
@@ -1295,25 +1335,27 @@ backtest.py reports summary stats; the interesting questions need slicing.
 - Hit rate — of each rebalance's 50 picks, how many beat SPY over the next
   21 days?
 
-### 9. FRED macro broadcast features (free, ~½ day)
+### 9. FRED macro broadcast features (free) — **SHIPPED 2026-05-11**
 
-Same broadcast-into-interaction pattern as `vix_level` / `spy_rsi_14` — single value per date, broadcast to every ticker. Earns reward only via cross-section interactions under date-demeaned labels (e.g. "high HY OAS + high D/E → underperform"). Captures macro-stress axes that VIX/SPY don't fully cover: term-structure regime and corporate credit stress.
+Shipped as **Bucket 2c — broadcast FRED macro regime context** (see the
+feature section above for definitions and empirical lift). Three series
+made it into the model:
 
-**Series to pull (free FRED API; `fredapi` or `pandas-datareader.data.DataReader`):**
+| Shipped name        | FRED ID  | Description                                          |
+| ------------------- | -------- | ---------------------------------------------------- |
+| `term_spread_10y3m` | `DGS10 − DGS3MO` | Yield-curve regime / NY Fed recession indicator |
+| `ig_credit_spread`  | `BAA10Y` | Moody's Baa minus 10y Treasury (IG credit stress)   |
+| `inflation_5y5y`    | `T5YIFR` | 5-Year 5-Year Forward Inflation Expectation         |
 
-| FRED ID         | Description                                           | Earliest    |
-| --------------- | ----------------------------------------------------- | ----------- |
-| `T10Y3M`        | 10-Year minus 3-Month Treasury (recession indicator)  | 1982-01     |
-| `BAMLH0A0HYM2`  | ICE BofA US High Yield Index OAS (credit stress)      | 1996-12     |
-| `DTWEXBGS` *(opt)* | Trade-weighted USD index                            | 2006-01     |
+**HY OAS (`BAMLH0A0HYM2`) was scoped out** — FRED's free CSV now
+truncates every ICE BofA series to 2023→ (full history is gated behind
+an API key). `BAA10Y` is ~0.85 correlated with HY OAS historically and
+serves as the credit-stress proxy. If a future iteration wants HY OAS
+specifically, the path is `FRED_API_KEY` + `https://api.stlouisfed.org/fred/series/observations`.
 
-**How to wire it.**
-
-1. Add `load_fred_macro()` to `data.py` mirroring `load_market()` shape (date-indexed DataFrame, one column per series, cached parquet under `data/market/`).
-2. Extend `compute_market_regime_features()` in `features.py:566` to merge the FRED frame onto the SPY date index.
-3. Append the new column names to `MARKET_REGIME_FEATURES` (`features.py:78`). They flow through `attach_market_regime` automatically.
-
-**Watch for partial redundancy.** Term spread and HY OAS capture different macro axes than VIX/SPY momentum, but if importance is 0 in both raw and interaction view after a stability sweep, prune. Treat the existing `vix_level` / `spy_rsi_14` interaction patterns as the bar to clear.
+Downloader: `scripts/macro.py` → cached to `data/market/macro.parquet`.
+Wired via `compute_macro_regime_features()` in `features.py` (broadcasts
+onto the panel's trading-day index with `ffill` only, never `bfill`).
 
 ### 10. Amihud illiquidity (free, ~1 hour)
 

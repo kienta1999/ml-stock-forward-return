@@ -7,10 +7,10 @@ on each invocation to keep the synthetic "today" snapshot in
 sp500_history.parquet aligned with the live roster. ~1s extra per run.
 
 Modes:
-    (default)         universe → data → earnings/insider/fundamentals → features → labels → today
+    (default)         universe → data → earnings/insider/fundamentals/macro → features → labels → today
     --retrain         (default) + train + backtest
     --full            alias for --retrain (retained for back-compat)
-    --download-only   universe → data → earnings → insider → fundamentals (refresh caches only)
+    --download-only   universe → data → earnings → insider → fundamentals → macro (refresh caches only)
 
 Other knobs:
     --no-diff       Skip --diff for today.py (don't auto-pick a prior file)
@@ -143,6 +143,7 @@ def main() -> int:
     steps.append(("Refresh EDGAR earnings calendar", py + ["scripts/earnings.py"]))
     steps.append(("Refresh EDGAR insider transactions (Form 4)", py + ["scripts/insider.py"]))
     steps.append(("Refresh EDGAR XBRL fundamentals", py + ["scripts/fundamentals.py"]))
+    steps.append(("Refresh FRED macro series", py + ["scripts/macro.py"]))
 
     if args.download_only:
         # Skip everything after the raw-data refresh: no features, labels,

@@ -38,6 +38,7 @@ from earnings import load_earnings_dates  # noqa: E402
 from data import load_market, load_prices  # noqa: E402
 from fundamentals import load_fundamentals  # noqa: E402
 from insider import load_insider_transactions  # noqa: E402
+from macro import load_macro  # noqa: E402
 from universe import (  # noqa: E402
     UNKNOWN_SECTOR,
     filter_to_members,
@@ -81,6 +82,20 @@ MARKET_REGIME_FEATURES: list[str] = [
     "spy_rsi_14",
     "vix_level",
     # "vix_zscore_20d",  # dead in 5/5 (subsumed by vix_level)
+]
+# Bucket 2b' — macro regime features from FRED. Same broadcast shape as
+# MARKET_REGIME_FEATURES: identical value across every ticker on a given
+# date, earns reward only via interactions with cross-sectional features
+# under date-demeaned labels. These plug the gaps VIX/SPY can't see:
+#   - term_spread_10y3m: yield-curve inversion (NY Fed's recession predictor)
+#   - ig_credit_spread:  debt-market stress, not equity (BAA10Y level)
+#   - inflation_5y5y:    long-run inflation expectations (T5YIFR level)
+# HY OAS (BAMLH0A0HYM2) was scoped out — FRED's free CSV no longer serves
+# its history. See `scripts/macro.py` docstring.
+MACRO_REGIME_FEATURES: list[str] = [
+    "term_spread_10y3m",
+    "ig_credit_spread",
+    "inflation_5y5y",
 ]
 # Sector-relative features: ret_n minus the equal-weighted within-(date, sector)
 # mean. Computed at panel-assembly time once all tickers are stacked. Excluded
@@ -176,6 +191,7 @@ NULLABLE_FEATURES: list[str] = (
 
 ALL_FEATURES: list[str] = (
     PER_TICKER_FEATURES + MARKET_FEATURES + MARKET_REGIME_FEATURES
+    + MACRO_REGIME_FEATURES
     + SECTOR_FEATURES
     + EARNINGS_FEATURES + FUNDAMENTAL_FEATURES + RANK_FEATURES
     + INSIDER_FEATURES
@@ -608,6 +624,49 @@ def attach_market_regime(
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Bucket 2b' — macro regime features (panel-level, broadcast by date)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def compute_macro_regime_features(
+    macro: pd.DataFrame, trading_dates: pd.DatetimeIndex
+) -> pd.DataFrame:
+    """Align FRED daily series onto the panel's trading-day index.
+
+    FRED occasionally skips a US federal holiday on which the equity market
+    is still open (e.g. Columbus Day) — forward-fill from the last
+    observation handles that without leaking future values. Backward-fill
+    is never used.
+    """
+    aligned = macro.copy()
+    aligned.index = pd.to_datetime(aligned.index)
+    # ffill only — last-known value is what a trader would see on day D.
+    aligned = aligned.sort_index().reindex(
+        aligned.index.union(trading_dates)
+    ).ffill().loc[trading_dates]
+
+    out = pd.DataFrame(index=trading_dates)
+    out["term_spread_10y3m"] = aligned["DGS10"] - aligned["DGS3MO"]
+    out["ig_credit_spread"] = aligned["BAA10Y"]
+    out["inflation_5y5y"] = aligned["T5YIFR"]
+    return out
+
+
+def attach_macro_regime(
+    panel: pd.DataFrame, macro_regime: pd.DataFrame
+) -> pd.DataFrame:
+    """Broadcast-merge the macro regime frame onto the panel by date."""
+    panel = panel.copy()
+    macro_regime = macro_regime.copy()
+    macro_regime.index.name = "date"
+    return panel.merge(
+        macro_regime[MACRO_REGIME_FEATURES].reset_index(),
+        on="date",
+        how="left",
+    )
+
+
 def add_sector_relative_returns(panel: pd.DataFrame) -> pd.DataFrame:
     """Bucket 3 — `excess_ret_n_vs_sector = ret_n − mean(ret_n)` within
     (date, gics_sector). Equal-weighted; the standard cross-sectional
@@ -643,6 +702,7 @@ def build_panel(
     earnings: pd.DataFrame | None = None,
     fundamentals: pd.DataFrame | None = None,
     insider: pd.DataFrame | None = None,
+    macro: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build the full long-format feature panel, filtered to point-in-time
     S&P 500 membership.
@@ -672,6 +732,8 @@ def build_panel(
         fundamentals = load_fundamentals()
     if insider is None:
         insider = load_insider_transactions()
+    if macro is None:
+        macro = load_macro()
 
     earnings_by_ticker: dict[str, pd.DatetimeIndex] = {}
     if earnings is not None and not earnings.empty:
@@ -728,6 +790,11 @@ def build_panel(
     regime = compute_market_regime_features(spy, vix)
     panel = attach_market_regime(panel, regime)
 
+    print("Attaching broadcast macro regime features (term spread / IG / inflation)...", flush=True)
+    trading_dates = pd.DatetimeIndex(panel["date"].unique()).sort_values()
+    macro_regime = compute_macro_regime_features(macro, trading_dates)
+    panel = attach_macro_regime(panel, macro_regime)
+
     print(
         f"Attaching XBRL fundamentals "
         f"({fundamentals['ticker'].nunique() if fundamentals is not None and not fundamentals.empty else 0} tickers)...",
@@ -744,6 +811,7 @@ def build_panel(
     cols_order = (
         ["date", "ticker", "gics_sector"]
         + PER_TICKER_FEATURES + MARKET_FEATURES + MARKET_REGIME_FEATURES
+        + MACRO_REGIME_FEATURES
         + SECTOR_FEATURES
         + EARNINGS_FEATURES + FUNDAMENTAL_FEATURES + RANK_FEATURES
         + INSIDER_FEATURES

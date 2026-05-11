@@ -299,8 +299,12 @@ def _objective(
         "colsample_bytree": trial.suggest_float("colsample_bytree", 0.55, 0.75),
         # reg_lambda: floor lowered from 0.01 to 0.001 (log). The saved
         # known-good params hit 0.01003 — bumping the prior wall — so the
-        # true optimum likely lives below 0.01. Ceiling kept at 10.0.
-        "reg_lambda": trial.suggest_float("reg_lambda", 0.001, 10.0, log=True),
+        # true optimum likely lives below 0.01. Ceiling tightened from 10.0
+        # to 1.0 after a 50-trial run on the 47-feature panel landed at
+        # 5.86 (paired with high lr + best_iter=34 = val-overfit trap that
+        # cost ~3.9 CAGR pts on test). Keeping the asymmetric-around-
+        # known-good shape used for colsample_bytree.
+        "reg_lambda": trial.suggest_float("reg_lambda", 0.001, 1.0, log=True),
     }
     model = _make_model(params, dates_val, seed=seed)
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)

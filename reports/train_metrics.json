@@ -8,12 +8,12 @@
     "colsample_bytree": 0.6236790005526994,
     "reg_lambda": 0.3047565711822111
   },
-  "best_iteration": 19,
-  "train_rmse": 0.06879888629149632,
-  "val_rmse": 0.07394139202831619,
-  "train_ic": 0.06322278540761853,
-  "val_ic": 0.035045626283309705,
-  "val_top_n_mean_return": 0.014225291406834857,
-  "val_top_n_sharpe": 0.37857358937121116,
-  "val_decile_spread": 0.010646524912484814
+  "best_iteration": 120,
+  "train_rmse": 0.06844484700750586,
+  "val_rmse": 0.07388992809965218,
+  "train_ic": 0.0795511480452256,
+  "val_ic": 0.030086123258153172,
+  "val_top_n_mean_return": 0.011655658013149316,
+  "val_top_n_sharpe": 0.28119037686017584,
+  "val_decile_spread": 0.009558456377206573
 }
