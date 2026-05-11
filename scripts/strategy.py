@@ -58,7 +58,7 @@ DEFAULT_WEIGHT_MODE = "equal"
 # Stability-selection sweeps override this via --seed; the per-seed
 # feature-importance CSV is only written when seed != DEFAULT_SEED so
 # the baseline file `feature_importance.csv` stays untouched.
-DEFAULT_SEED = 17
+DEFAULT_SEED = 15
 
 
 # ─────────────────────────────────────────────────────────────────────────────

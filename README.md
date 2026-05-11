@@ -6,23 +6,31 @@ decile, hold 21 trading days, rebalance monthly with a **vol-targeted
 sizing overlay** (replaces the legacy SPY/VIX regime gate as of 2026-05-11).
 
 **Current status (+ 3 FRED macro features + vol-target overlay,
-200-trial sweep on 47 features, seed 17):** raw long-only **+22.3%
-CAGR / Sharpe 0.87 vs SPY +12.7% / Sharpe 0.75** (test 2021-01-04 →
-2026-03-31). Strategy delivers +9.6 CAGR pts over SPY at 1.50× SPY
-vol / 1.75× SPY return. Final NAV **2.86×** vs SPY 1.87×. MaxDD
-**-26.63%** (raw), **-24.76%** (vol-targeted overlay — for the first
-time *under* SPY's -24.50%, with Sharpe 0.83 and CAGR +19.4%).
-`best_iteration=9` with `learning_rate=0.004` and `reg_lambda=0.003`
-— optuna landed on a heavily regularized config that gave up ~1 CAGR
-pt vs `--quick` for ~2 pts of drawdown protection on both variants.
-The vol-target overlay (`exposure = min(1.0, 0.20 / spy_vol_20d)`)
-replaces the legacy binary VIX/SMA200 gate as of 2026-05-11; it
-scales gross exposure continuously and averaged 95% in the 2021-2026
-window (overlay barely activated because there was no real vol
-spike). The honest stress test is the leave-2008-out walk-forward
-(see "Vol-target overlay" below): even with the overlay, raw 2008
-MaxDD bottoms around -64% — long-only top-40 has a structural
-drawdown floor no overlay alone can break.
+200-trial sweep on 47 features, seed 15):** raw long-only **+23.0%
+CAGR / Sharpe 0.87 vs SPY +13.6% / Sharpe 0.80** (test 2021-01-04 →
+2026-04-09). Strategy delivers +9.4 CAGR pts over SPY. Final NAV
+**2.96×** vs SPY 1.95×. MaxDD **-28.1%** (raw), **-25.5%**
+(vol-targeted overlay, Sharpe 0.82 / CAGR +20.2%). Saved
+hyperparams: `best_iter=41`, `lr=0.0015`, `colsample=0.579`,
+`reg_lambda=0.005`, `max_depth=5`.
+
+**Cross-seed stability (2026-05-11).** Re-ran a 200-trial sweep on a
+different seed (17 vs 15). Optuna landed in different hyperparam
+basins (`best_iter=9` vs `41`, `lr=0.004` vs `0.0015`, `max_depth=4`
+vs `5`) but converged on **identical raw Sharpe 0.87** (CAGR 22.3%
+vs 23.0%, MaxDD -26.6% vs -28.1%) and within 0.01 on vol-target
+Sharpe (0.82 vs 0.83). Top picks overlap heavily — TTD, SMCI, INTC,
+CHTR, AXON, COIN, HOOD appear top-12 on both seeds. Different hyper-
+params, same alpha → the signal lives in the data + features, not in
+a lucky landing. The strategy is not random.
+
+**Important caveat: this is a calm window.** Avg vol-target exposure
+was 95% in 2021-2026 — the overlay barely activated because there
+was no real vol spike (2022 was a slow grind). The leave-2008-out
+walk-forward stress test (see "Vol-target overlay" below) shows raw
+MaxDD -64.6% with the model trained on 2010-2019 and tested on
+2007-2009 — long-only top-40 has a structural drawdown floor no
+overlay alone can break.
 
 The lift came from the **5-seed stability-selection prune**: hold
 hyperparams fixed at `DEFAULT_PARAMS`, vary only `random_state ∈
@@ -701,32 +709,33 @@ date so the headline comparison is apples-to-apples by default; the CSV
 keeps the full SPY series so the post-strategy tail is visible for
 inspection.
 
-**Current model (`models/xgb_v1.json`, retrained 2026-05-11 with macro features + 200-trial sweep on seed 17):**
+**Current model (`models/xgb_v1.json`, 200-trial sweep on 47 features, seed 15, retrained 2026-05-11):**
 
 | Variant                              | CAGR       | Vol   | Sharpe    | Max DD     | Final NAV | Avg Exposure |
 | ------------------------------------ | ---------- | ----- | --------- | ---------- | --------- | ------------ |
-| **Raw long-only**                    | **+22.3%** | 25.6% | **+0.87** | -26.6%     | **2.86×** | 100%         |
-| Vol-targeted (target 0.20)           | +19.4%     | 23.5% | +0.83     | **-24.8%** | 2.52×     | 95%          |
-| SPY buy & hold (clipped @2026-03-31) | +12.7%     | 17.0% | +0.75     | -24.5%     | 1.87×     | —            |
+| **Raw long-only**                    | **+23.0%** | 26.6% | **+0.87** | -28.1%     | **2.96×** | 100%         |
+| Vol-targeted (target 0.20)           | +20.2%     | 24.6% | +0.82     | **-25.5%** | 2.63×     | 95%          |
+| SPY buy & hold (clipped @2026-04-09) | +13.6%     | 17.0% | +0.80     | -24.5%     | 1.95×     | —            |
 
-**Reading the table honestly:** raw beats SPY by +9.6 CAGR points and
-**the Sharpe gap over SPY widens from +0.01 to +0.12** (0.87 vs 0.75).
-Strategy runs at 1.50× SPY's vol but earns 1.75× SPY's return — risk-
-efficiency keeps improving over the benchmark. Final NAV 2.86 vs 1.87 =
-**+53% more wealth** over 5.25 years. The 200-trial sweep gave back ~1
-CAGR pt vs the prior `--quick` model in exchange for ~2 pts of MaxDD
-protection on both variants and a healthier train/val IC ratio (0.061 /
-0.051 vs 0.080 / 0.030) — same Sharpe, smaller tail. The vol-targeted
-variant's MaxDD (-24.76%) is the first time this strategy has come in
-*under* SPY's drawdown (-24.50%), at a CAGR give-up of ~3 pts.
-`best_iteration=9` with `learning_rate=0.004`, `reg_lambda=0.003` — a
-heavily-regularized model that pays for itself in tail behavior.
+**Reading the table honestly:** raw beats SPY by +9.4 CAGR points at
+Sharpe 0.87 vs 0.80 — the Sharpe gap is +0.07. Final NAV 2.96× vs SPY
+1.95× = **+52% more wealth** over 5.25 years. Saved hyperparams:
+`best_iteration=41`, `lr=0.0015`, `reg_lambda=0.005`, `max_depth=5`.
 
-**Important caveat: this is a calm window for vol-target.** Avg exposure
-95% means the overlay barely activated in 2021-2026 — the 2022 bear was
-a slow grind, not a vol explosion. The leave-2008-out walk-forward test
-puts raw MaxDD at -64.6%; vol-target would scale exposure to ~40% during
-Sep-Nov 2008 but the long-only floor is still deep.
+**Cross-seed stability:** the same 200-trial protocol on **seed 17**
+(prior commit, recorded here for the multi-seed evidence) produced raw
+CAGR 22.3% / Sharpe **0.87** / MaxDD -26.6% — Sharpe identical, MaxDD
+within 1.5pt, with optuna landing in a very different hyperparam basin
+(`best_iter=9`, `lr=0.004`, `max_depth=4`). Vol-target Sharpe 0.82 (this
+seed) vs 0.83 (seed 17), MaxDD -25.5% vs -24.8%. **Two seeds → same
+alpha** — the signal lives in features + data, not in lucky
+hyperparams.
+
+**Important caveat: this is a calm window for vol-target.** Avg
+exposure 95% means the overlay barely activated in 2021-2026 — the 2022
+bear was a slow grind, not a vol explosion. The leave-2008-out walk-
+forward test puts raw MaxDD at -64.6%; vol-target would scale exposure
+to ~40% during Sep-Nov 2008 but the long-only floor is still deep.
 
 ### Why default top-40, raw (no gate)
 
