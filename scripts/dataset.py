@@ -45,6 +45,7 @@ from features import (  # noqa: E402
     compute_features,
 )
 from labels import LABEL_COL  # noqa: E402
+from strategy import DEFAULT_SEED  # noqa: E402
 
 _ROOT = os.path.dirname(_HERE)
 PANEL_PATH = os.path.join(_ROOT, "data", "processed", "panel.parquet")
@@ -171,7 +172,7 @@ _VERIFIABLE_COLS: list[str] = PER_TICKER_FEATURES + MARKET_FEATURES
 def assert_no_lookahead(
     panel: pd.DataFrame,
     n_samples: int = 50,
-    seed: int = 42,
+    seed: int = DEFAULT_SEED,
     tol: float = 1e-6,
 ) -> None:
     """Sample random (ticker, date) rows, truncate raw price/SPY history to

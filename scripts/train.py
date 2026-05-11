@@ -42,7 +42,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from dataset import FEATURE_COLS, TARGET_COL, load_panel, split  # noqa: E402
-from strategy import TOP_N  # noqa: E402  — used as the optuna scoring window
+from strategy import DEFAULT_SEED, TOP_N  # noqa: E402  — TOP_N used as the optuna scoring window
 
 _ROOT = os.path.dirname(_HERE)
 MODEL_PATH = os.path.join(_ROOT, "models", "xgb_v1.json")
@@ -221,7 +221,7 @@ def _make_top_n_mean_return_eval_metric(dates_val: np.ndarray, top_n: int = TOP_
 
 
 def _make_model(
-    params: dict, dates_val: pd.Series, seed: int = 42
+    params: dict, dates_val: pd.Series, seed: int = DEFAULT_SEED
 ) -> xgb.XGBRegressor:
     """XGBoost regressor with native categorical (gics_sector) support.
 
@@ -262,7 +262,7 @@ def _objective(
     X_val: pd.DataFrame,
     y_val: pd.Series,
     dates_val: pd.Series,
-    seed: int = 42,
+    seed: int = DEFAULT_SEED,
 ) -> float:
     """Train one model with the trial's hyperparameters; return val top-N mean return.
 
@@ -319,7 +319,7 @@ def tune(
     y_val: pd.Series,
     dates_val: pd.Series,
     n_trials: int,
-    seed: int = 42,
+    seed: int = DEFAULT_SEED,
 ) -> tuple[dict, optuna.study.Study]:
     """Run optuna search; return (best_params, study)."""
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -348,7 +348,7 @@ def fit_and_evaluate(
     y_val: pd.Series,
     dates_train: pd.Series,
     dates_val: pd.Series,
-    seed: int = 42,
+    seed: int = DEFAULT_SEED,
 ) -> tuple[xgb.XGBRegressor, dict]:
     model = _make_model(params, dates_val, seed=seed)
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
@@ -388,7 +388,7 @@ def save_reports(
     metrics: dict,
     feature_cols: list[str],
     reports_dir: str,
-    seed: int = 42,
+    seed: int = DEFAULT_SEED,
 ) -> None:
     os.makedirs(reports_dir, exist_ok=True)
 
@@ -399,7 +399,7 @@ def save_reports(
     fi_df.to_csv(os.path.join(reports_dir, "feature_importance.csv"), index=False)
     # When sweeping seeds, also save a per-seed copy so the stability-selection
     # post-processing can pool importances across runs.
-    if seed != 42:
+    if seed != DEFAULT_SEED:
         fi_df.to_csv(
             os.path.join(reports_dir, f"feature_importance_seed{seed}.csv"),
             index=False,
@@ -453,7 +453,7 @@ def main() -> None:
     ap.add_argument(
         "--seed",
         type=int,
-        default=42,
+        default=DEFAULT_SEED,
         help="Random seed (XGBoost random_state + optuna TPE seed). "
              "Use different values for stability-selection sweeps.",
     )

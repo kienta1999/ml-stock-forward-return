@@ -22,8 +22,13 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from dataset import FEATURE_COLS  # noqa: E402
-from features import CATEGORICAL_FEATURES, NULLABLE_FEATURES  # noqa: E402
+# Import ALL_FEATURES directly from features.py rather than via dataset.py to
+# avoid a circular import — dataset.py imports DEFAULT_SEED from this module.
+from features import (  # noqa: E402
+    ALL_FEATURES as FEATURE_COLS,
+    CATEGORICAL_FEATURES,
+    NULLABLE_FEATURES,
+)
 
 # Default knobs (override at the call site if needed).
 TOP_N = 40
@@ -33,6 +38,13 @@ VIX_THRESHOLD = 25.0
 
 WEIGHT_MODES = ("equal", "pred")
 DEFAULT_WEIGHT_MODE = "equal"
+
+# Default random seed used everywhere we have an RNG knob (XGBoost
+# `random_state`, optuna TPE, dataset.assert_no_lookahead sampling).
+# Stability-selection sweeps override this via --seed; the per-seed
+# feature-importance CSV is only written when seed != DEFAULT_SEED so
+# the baseline file `feature_importance.csv` stays untouched.
+DEFAULT_SEED = 42
 
 
 # ─────────────────────────────────────────────────────────────────────────────
