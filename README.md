@@ -744,9 +744,32 @@ double-penalises those names.
 component contributes orthogonal information. Insider-sell-only is the
 strongest single axis (0.91 Sharpe alone) but combined-loose beats it.
 
-On the live slice (2026-05-08), the filter drops only 4 of 501
-candidates: APP (insider net -$162M), CCL (current ratio 0.30), DELL
-(insider net -$51M), NCLH (current ratio 0.21).
+**What gets dropped in practice (2026-05-08 live slice — 4 of 501 candidates):**
+
+| Ticker | Pred. 21d return | Trigger                         | Why it's "cataclysmic"                                                                                                                                                                                  |
+| ------ | ---------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| APP    | +0.16%           | `insider_net_60d = -$162.1M`    | AppLovin — insiders dumping more than 3× our $50M threshold over the trailing 60 days. The single largest insider-exit signal in the universe; people who can see the next quarter's pipeline are out. |
+| DELL   | +0.22%           | `insider_net_60d = -$51.5M`     | Just over the $50M threshold. Post-AI-rally cash-out; not as severe as APP but still flags "the people closest to the numbers are taking chips off the table."                                         |
+| CCL    | +0.16%           | `current_ratio = 0.30`          | Carnival Corp — only 30¢ of current assets per $1 of current liabilities. Post-COVID balance sheet is still broken; the cruise lines levered up to survive 2020 and haven't repaired liquidity.        |
+| NCLH   | +0.24%           | `current_ratio = 0.21`          | Norwegian Cruise Line — even worse than CCL at 21¢ per $1. A near-insolvent working-capital position on paper; one bad quarter from forced refinancing.                                                |
+
+None of these have catastrophic `debt_to_equity` (>10) or
+`sales_growth_yoy < -0.50` — the universe in this regime is debt-managed
+and growing. The filter is doing its job: catching the few names whose
+*single* fundamental flag is in clear "this might go to zero" territory,
+without touching the 99% of names where the model's interaction-based
+ranking should be trusted.
+
+For comparison, the **previous tight defaults** (D/E>5, CR<0.5,
+sales_yoy<-0.30, ROA<-0.20, insider_net<-$20M) dropped 9 of 501 — same
+4 names above plus AXON (insider -$24.9M, just over the old -$20M
+line), CHTR (CR 0.40), IT (D/E 9.3), LUV (CR 0.48), MRNA (ROA -27.8%).
+All five are debatable: MRNA is a development-stage biotech that
+*should* have negative ROA, CHTR and LUV operate in capital-intensive
+industries where 0.4–0.5 current ratios are normal, AXON's insider sale
+was post-rally profit-taking not a panic exit, and IT has carried high
+leverage through years of strong stock performance. Loosening the
+thresholds gives the model back exactly the names it was right about.
 
 To revert to no filter, pass `--no-quality-filter`. To use stricter
 thresholds, edit `QUALITY_FILTER_DEFAULTS` in `scripts/strategy.py` —
