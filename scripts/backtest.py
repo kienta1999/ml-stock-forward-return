@@ -103,6 +103,7 @@ def run_one_offset(
     cost_per_side: float,
     vol_target: float,
     weight_mode: str,
+    quality_filter_on: bool,
 ) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
     """Single backtest with rebalances on day `offset`, `offset+hold_days`, ....
 
@@ -142,6 +143,8 @@ def run_one_offset(
 
             if exposure > 0 and date in by_date:
                 day = by_date[date]
+                if quality_filter_on:
+                    day = strategy.apply_quality_filter(day)
                 top = strategy.top_picks(day, top_n)
                 pick_weights = strategy.compute_weights(top, weight_mode)
                 new_weights = {t: w * exposure for t, w in pick_weights.items()}
@@ -179,6 +182,7 @@ def run_shifted_starts(
     cost_per_side: float,
     vol_target: float,
     weight_mode: str,
+    quality_filter_on: bool,
 ) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series]:
     """Run `hold_days` backtests at different rebalance offsets.
 
@@ -188,10 +192,17 @@ def run_shifted_starts(
     offset=0 only — one representative pick log, tractable to write to CSV.
     """
     test_dates = sorted(test_panel["date"].unique())
-    by_date = {
-        d: g[["ticker", "ret_1d", "predicted_return"]]
-        for d, g in test_panel.groupby("date")
-    }
+    # Carry the quality-filter columns alongside the P&L/ranking columns; the
+    # filter runs once per rebalance day and is cheap on a per-date slice.
+    quality_cols = [
+        c for c in (
+            "debt_to_equity", "current_ratio", "sales_growth_yoy",
+            "roa", "insider_net_dollar_60d",
+        )
+        if c in test_panel.columns
+    ]
+    keep_cols = ["ticker", "ret_1d", "predicted_return"] + quality_cols
+    by_date = {d: g[keep_cols] for d, g in test_panel.groupby("date")}
 
     curves: dict[int, pd.Series] = {}
     tim: dict[int, float] = {}
@@ -203,6 +214,7 @@ def run_shifted_starts(
             vol_target_on=vol_target_on, top_n=top_n, hold_days=hold_days,
             cost_per_side=cost_per_side, vol_target=vol_target,
             weight_mode=weight_mode,
+            quality_filter_on=quality_filter_on,
         )
         curves[offset] = eq
         tim[offset] = float(inm.mean())
@@ -323,6 +335,16 @@ def main() -> None:
     ap.add_argument("--no-overlay", action="store_true",
                     help="Skip the vol-target variant (only run raw long-only + SPY).")
     ap.add_argument(
+        "--no-quality-filter",
+        action="store_true",
+        help=(
+            "Disable the cataclysmic-only fundamentals/insider filter applied "
+            "before top-N selection. Defaults (strategy.QUALITY_FILTER_DEFAULTS): "
+            "drop debt_to_equity>10, current_ratio<0.3, sales_growth_yoy<-0.50, "
+            "insider_net_dollar_60d<-50M. NaN values always pass."
+        ),
+    )
+    ap.add_argument(
         "--weight",
         choices=strategy.WEIGHT_MODES,
         default=strategy.DEFAULT_WEIGHT_MODE,
@@ -336,6 +358,7 @@ def main() -> None:
     args = ap.parse_args()
 
     cost_per_side = args.cost_bps / 1e4
+    quality_filter_on = not args.no_quality_filter
 
     print("Loading panel and predicting on test set...")
     panel = load_panel()
@@ -350,24 +373,27 @@ def main() -> None:
     gated_tim: pd.Series | None = None
     gated_holdings: pd.Series | None = None
     gated_avg_exp: pd.Series | None = None
+    qf_label = "ON" if quality_filter_on else "OFF"
     if not args.no_overlay:
         print(f"Running long-only WITH vol-target overlay "
               f"(target={args.vol_target:.2f}, {args.hold_days} offsets, "
-              f"weight={args.weight})...")
+              f"weight={args.weight}, quality_filter={qf_label})...")
         gated_curves, gated_tim, gated_holdings, gated_avg_exp = run_shifted_starts(
             test_panel, market,
             vol_target_on=True, top_n=args.top_n, hold_days=args.hold_days,
             cost_per_side=cost_per_side, vol_target=args.vol_target,
             weight_mode=args.weight,
+            quality_filter_on=quality_filter_on,
         )
 
     print(f"Running long-only RAW / no overlay ({args.hold_days} offsets, "
-          f"weight={args.weight})...")
+          f"weight={args.weight}, quality_filter={qf_label})...")
     raw_curves, _, raw_holdings, _ = run_shifted_starts(
         test_panel, market,
         vol_target_on=False, top_n=args.top_n, hold_days=args.hold_days,
         cost_per_side=cost_per_side, vol_target=args.vol_target,
         weight_mode=args.weight,
+        quality_filter_on=quality_filter_on,
     )
 
     test_start = pd.Timestamp(test_panel["date"].min())

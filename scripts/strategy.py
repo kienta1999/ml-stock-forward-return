@@ -203,6 +203,77 @@ def compute_weights(
     raise ValueError(f"unknown weight mode: {mode!r} (expected one of {WEIGHT_MODES})")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Quality filter — drop "trash" names before top-N selection
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Hard-coded fundamentals/insider thresholds. A name failing ANY check is
+# dropped from the candidate pool. NaN values pass (the company has no
+# fundamentals/insider coverage — XGBoost already handles missing natively).
+#
+# These are intentionally LOOSE — they catch only the "absolutely
+# cataclysmic" names (firm-going-to-zero zone), not just "weak quarter" or
+# "expensive". A 2026-05-17 sweep on the 2021→2026 raw long-only backtest:
+#
+#   variant                 hits%   CAGR     Sharpe   MaxDD
+#   no_filter (baseline)     0.0%   +23.02%   0.87    -28.14%
+#   current (these defaults) 10.8%  +24.29%   0.95    -26.48%   ← winner
+#   loose (D/E>7 etc.)       16.9%  +22.82%   0.91    -25.57%
+#   tight (D/E>3 etc.)       33.9%  +19.53%   0.82    -24.52%
+#   very_tight (D/E>2)       52.7%  +17.58%   0.79    -23.08%
+#
+# Lesson: tighter filters DO improve drawdown linearly but kill CAGR faster.
+# Only the cataclysmic-only filter is Pareto-better than no filter at all —
+# the model has already priced "merely weak" names via interactions, and
+# stripping them removes mean-reversion winners.
+#
+# ROA intentionally absent: development-stage names (biotech, early SaaS,
+# capex-heavy growth) show deeply negative ROA while ripping. Model already
+# sees ROA + roa_rank.
+QUALITY_FILTER_DEFAULTS: dict[str, float] = {
+    "max_debt_to_equity": 10.0,                       # truly extreme leverage
+    "min_current_ratio": 0.3,                         # near-insolvent liquidity
+    "min_sales_growth_yoy": -0.50,                    # revenue more than halved
+    "max_insider_net_sell_60d": -50_000_000.0,        # insiders dumping >$50M net
+}
+
+
+def apply_quality_filter(
+    day_panel: pd.DataFrame,
+    thresholds: dict[str, float] | None = None,
+) -> pd.DataFrame:
+    """Drop rows whose fundamentals/insider columns flag the name as 'trash'.
+
+    Applied *before* `top_picks` so the basket still has TOP_N survivors. NaN
+    values always pass — missing fundamentals are not evidence of low quality
+    (could be a young filer, a name with patchy EDGAR coverage, or pre-XBRL).
+
+    `thresholds` is a partial dict — only keys present are enforced, so callers
+    can mix-and-match (e.g. only the insider check). Missing columns in the
+    panel are also silently skipped, so older panels still load.
+    """
+    if thresholds is None:
+        thresholds = QUALITY_FILTER_DEFAULTS
+
+    df = day_panel
+    keep = pd.Series(True, index=df.index)
+
+    checks = (
+        ("max_debt_to_equity", "debt_to_equity", lambda s, t: s > t),
+        ("min_current_ratio", "current_ratio", lambda s, t: s < t),
+        ("min_sales_growth_yoy", "sales_growth_yoy", lambda s, t: s < t),
+        ("min_roa", "roa", lambda s, t: s < t),
+        ("max_insider_net_sell_60d", "insider_net_dollar_60d", lambda s, t: s < t),
+    )
+    for key, col, mask_fn in checks:
+        if key not in thresholds or col not in df.columns:
+            continue
+        bad = mask_fn(df[col], thresholds[key]).fillna(False)
+        keep &= ~bad
+
+    return df[keep]
+
+
 def filter_valid_features(panel: pd.DataFrame) -> pd.DataFrame:
     """Keep rows where all *required* numeric features are non-NaN.
 

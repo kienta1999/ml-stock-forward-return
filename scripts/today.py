@@ -138,6 +138,16 @@ def main() -> None:
         help="Skip vol-target overlay; always recommend 100% exposure.",
     )
     ap.add_argument(
+        "--no-quality-filter",
+        action="store_true",
+        help=(
+            "Disable the cataclysmic-only fundamentals/insider filter applied "
+            "before top-N selection. Defaults (strategy.QUALITY_FILTER_DEFAULTS): "
+            "drop debt_to_equity>10, current_ratio<0.3, sales_growth_yoy<-0.50, "
+            "insider_net_dollar_60d<-50M. NaN values always pass."
+        ),
+    )
+    ap.add_argument(
         "--diff",
         help="Path to a previous picks CSV to compute BUY/SELL/HOLD list against.",
     )
@@ -195,7 +205,16 @@ def main() -> None:
         print("\n=== STAY IN CASH (exposure = 0) ===")
         picks_df = pd.DataFrame(columns=["ticker", "predicted_return", "weight"])
     else:
-        top = strategy.top_picks(today, args.top_n)[
+        candidates = today
+        if not args.no_quality_filter:
+            before = len(candidates)
+            candidates = strategy.apply_quality_filter(candidates)
+            dropped = before - len(candidates)
+            print(
+                f"\nQuality filter: dropped {dropped} of {before} candidates "
+                f"({dropped / before * 100:.1f}%) on fundamentals/insider thresholds."
+            )
+        top = strategy.top_picks(candidates, args.top_n)[
             ["ticker", "predicted_return"]
         ].copy().reset_index(drop=True)
         pick_weights = strategy.compute_weights(top, args.weight)

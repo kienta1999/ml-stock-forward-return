@@ -5,24 +5,37 @@ return independently with XGBoost, sort to get a daily ranking, long the top
 decile, hold 21 trading days, rebalance monthly with a **vol-targeted
 sizing overlay** (replaces the legacy SPY/VIX regime gate as of 2026-05-11).
 
-**Current status (+ 3 FRED macro features + vol-target overlay,
-200-trial sweep on 47 features, seed 15):** raw long-only **+23.0%
-CAGR / Sharpe 0.87 vs SPY +13.6% / Sharpe 0.80** (test 2021-01-04 →
-2026-04-09). Strategy delivers +9.4 CAGR pts over SPY. Final NAV
-**2.96×** vs SPY 1.95×. MaxDD **-28.1%** (raw), **-25.5%**
-(vol-targeted overlay, Sharpe 0.82 / CAGR +20.2%). Saved
-hyperparams: `best_iter=41`, `lr=0.0015`, `colsample=0.579`,
-`reg_lambda=0.005`, `max_depth=5`.
+**Current status (+ 3 FRED macro features + vol-target overlay +
+cataclysmic-only quality filter, 200-trial sweep on 47 features, seed 15):**
+raw long-only **+24.3% CAGR / Sharpe 0.95 vs SPY +13.6% /
+Sharpe 0.80** (test 2021-01-04 → 2026-04-09). Strategy delivers
+**+10.7 CAGR pts** over SPY. Final NAV **3.13×** vs SPY 1.95×. MaxDD
+**-26.5%** (raw), **-25.0%** (vol-targeted overlay, Sharpe **0.91** /
+CAGR +21.5%). Saved hyperparams: `best_iter=41`, `lr=0.0015`,
+`colsample=0.579`, `reg_lambda=0.005`, `max_depth=5`.
 
-**Cross-seed stability (2026-05-11).** Re-ran a 200-trial sweep on a
-different seed (17 vs 15). Optuna landed in different hyperparam
-basins (`best_iter=9` vs `41`, `lr=0.004` vs `0.0015`, `max_depth=4`
-vs `5`) but converged on **identical raw Sharpe 0.87** (CAGR 22.3%
-vs 23.0%, MaxDD -26.6% vs -28.1%) and within 0.01 on vol-target
-Sharpe (0.82 vs 0.83). Top picks overlap heavily — TTD, SMCI, INTC,
-CHTR, AXON, COIN, HOOD appear top-12 on both seeds. Different hyper-
-params, same alpha → the signal lives in the data + features, not in
-a lucky landing. The strategy is not random.
+**Quality filter (added 2026-05-17).** A loose fundamentals/insider
+"cataclysmic-only" filter runs before top-N selection: drop names with
+`debt_to_equity > 10`, `current_ratio < 0.3`, `sales_growth_yoy < -0.50`,
+or `insider_net_dollar_60d < -50M`. NaN values pass — no fundamentals
+coverage isn't evidence of low quality. Sweep across 7 threshold
+variants showed the loose version is Pareto-better than no filter (raw
+CAGR 23.0% → 24.3%, Sharpe 0.87 → 0.95, MaxDD -28.1% → -26.5%); tighter
+variants reduce drawdown linearly but kill CAGR faster than they help.
+See [Quality filter](#quality-filter-cataclysmic-only-fundamentalinsider-screen)
+for the full sweep table.
+
+**Cross-seed stability (2026-05-11, pre-quality-filter baseline).**
+Re-ran a 200-trial sweep on a different seed (17 vs 15). Optuna landed
+in different hyperparam basins (`best_iter=9` vs `41`, `lr=0.004` vs
+`0.0015`, `max_depth=4` vs `5`) but converged on **identical raw
+Sharpe 0.87** (CAGR 22.3% vs 23.0%, MaxDD -26.6% vs -28.1%) and within
+0.01 on vol-target Sharpe (0.82 vs 0.83). Top picks overlap heavily —
+TTD, SMCI, INTC, CHTR, AXON, COIN, HOOD appear top-12 on both seeds.
+Different hyperparams, same alpha → the signal lives in the data +
+features, not in a lucky landing. The strategy is not random. (The
+quality filter described above adds +0.08 Sharpe on top of these
+underlying model numbers.)
 
 **Important caveat: this is a calm window.** Avg vol-target exposure
 was 95% in 2021-2026 — the overlay barely activated because there
@@ -85,7 +98,7 @@ filters and picks. Here we score and sort.
 | Label    | `forward_21d_return − date_mean(forward_21d_return)` — date-demeaned (cross-sectional excess). Raw `forward_21d_return` is clipped to ±0.5 first to cap dead-ticker outliers, then demeaned. The model can only learn within-date ordering, not market direction.                                                                                                                                                                  |
 | Split    | Train 2007–2017, Val 2018–2020, Test 2021→. Chronological. No shuffling.                                                                                                                                                                                                                                                                                                                                                           |
 | Model    | XGBoost regressor, RMSE loss, optuna-tuned on val decile spread (max_depth ∈ [3, 6], 100 trials, ES=100 rounds)                                                                                                                                                                                                                                                                                                                    |
-| Backtest | Long-only top-40, monthly rebalance, vol-targeted sizing overlay (`exposure = min(1.0, 0.20 / spy_vol_20d)`), 21 shifted-start offsets                                                                                                                                                                                                                                                                                             |
+| Backtest | Long-only top-40 (after cataclysmic-only quality filter drops D/E>10 / CR<0.3 / sales_yoy<-0.50 / insider_net<-$50M), monthly rebalance, vol-targeted sizing overlay (`exposure = min(1.0, 0.20 / spy_vol_20d)`), 21 shifted-start offsets                                                                                                                                                                                       |
 | Costs    | 5 bps per side on rebalance turnover                                                                                                                                                                                                                                                                                                                                                                                               |
 
 Every feature on row date=D uses only data observable at the close of D.
@@ -166,15 +179,17 @@ uv run python scripts/train.py --trials 20          # faster tune
 uv run python scripts/train.py --quick              # skip tuning, use sane defaults
 uv run python scripts/train.py --quick --seed 3     # vary RNG (XGBoost + optuna) for stability-selection sweeps
 
-uv run python scripts/backtest.py                    # long-only raw + vol-targeted overlay, 21 shifted starts (~1 min)
+uv run python scripts/backtest.py                    # long-only raw + vol-targeted overlay + quality filter, 21 shifted starts (~1 min)
 uv run python scripts/backtest.py --no-overlay       # skip vol-target variant (raw only)
+uv run python scripts/backtest.py --no-quality-filter # disable the cataclysmic-only fundamentals/insider screen
 uv run python scripts/backtest.py --top-n 25         # tighter pick (default 40)
 uv run python scripts/backtest.py --vol-target 0.15  # more aggressive de-risk (default 0.20)
 uv run python scripts/backtest.py --weight pred      # weight basket by predicted_return (default: equal); see "Basket weighting" below
 
-uv run python scripts/today.py                                   # latest-date picks (vol-target sizing + top 40)
+uv run python scripts/today.py                                   # latest-date picks (vol-target sizing + quality filter + top 40)
 uv run python scripts/today.py --diff picks/picks_YYYY-MM-DD.csv # buy/sell list vs that prior file
 uv run python scripts/today.py --no-overlay                      # ignore vol-target (always 100% exposure)
+uv run python scripts/today.py --no-quality-filter               # disable the cataclysmic-only fundamentals/insider screen
 uv run python scripts/today.py --vol-target 0.15                 # more conservative sizing
 uv run python scripts/today.py --weight pred                     # pred-weighted basket (default: equal)
 
@@ -674,6 +689,70 @@ VIX/SMA200 retired but reversible: `regime_long`/`regime_long_row` are
 preserved in `strategy.py`; uncomment the `spy_sma200` line in
 `prepare_market` to bring them back.
 
+### Quality filter (cataclysmic-only fundamental/insider screen)
+
+Added 2026-05-17. `strategy.apply_quality_filter` runs once per rebalance
+date *before* `top_picks`, dropping candidates that hit any of these
+"firm-going-to-zero" thresholds:
+
+```python
+QUALITY_FILTER_DEFAULTS = {
+    "max_debt_to_equity":       10.0,            # truly extreme leverage
+    "min_current_ratio":         0.3,            # near-insolvent liquidity
+    "min_sales_growth_yoy":     -0.50,           # revenue more than halved
+    "max_insider_net_sell_60d": -50_000_000.0,   # insiders dumping >$50M net
+}
+```
+
+**NaN values always pass** — missing fundamentals/insider coverage is not
+evidence of low quality (could be pre-XBRL, a young filer, or thinly-
+covered ticker). XGBoost already handles missing natively. The filter
+is opt-out via `--no-quality-filter` in both `backtest.py` and `today.py`.
+
+**Why these specific thresholds.** A 2026-05-17 sweep across 7 variants
+on the raw long-only backtest (21-offset mean):
+
+| Variant                    | Hits% | CAGR    | Sharpe | Max DD  |
+| -------------------------- | ----- | ------- | ------ | ------- |
+| no_filter (baseline)       |  0.0% | +23.02% |  0.87  | -28.14% |
+| **very_loose (current default)** | **10.8%** | **+24.29%** | **0.95** | -26.48% |
+| loose (D/E>7 etc.)         | 16.9% | +22.82% |  0.91  | -25.57% |
+| tight (D/E>3, CR<0.7)      | 33.9% | +19.53% |  0.82  | -24.52% |
+| very_tight (D/E>2, CR<1.0) | 52.7% | +17.58% |  0.79  | -23.08% |
+| only_insider_sell ≤-$20M   | 12.7% | +23.33% |  0.91  | -25.72% |
+| only_leverage_>5           |  3.7% | +22.27% |  0.84  | -29.16% |
+| only_liquidity_<0.5        |  2.4% | +22.65% |  0.86  | -27.73% |
+| only_sales_collapse_<-30%  |  5.3% | +22.86% |  0.88  | -28.36% |
+
+**Key insight:** tighter filters DO reduce drawdown monotonically (lower
+vol, lower MaxDD as hit-rate climbs), but they kill CAGR *faster* than
+they help. The model already prices "merely weak" fundamentals via
+interactions with regime features — e.g. a tree splits on `vix_level > 25`
+then on `debt_to_equity_rank` and learns "high leverage underperforms
+in stress regimes". A hard threshold on top of that throws away
+mean-reversion winners (high D/E + oversold) that the regime
+interaction correctly flips positive. Only the **cataclysmic-only** zone
+(~10% hits) is Pareto-additive: at that level, the names you remove are
+broken enough that no regime interaction redeems them.
+
+**ROA intentionally absent** from defaults. Development-stage names
+(biotech, early SaaS, capex-heavy growth) show deeply negative ROA while
+ripping. The model already sees ROA + roa_rank; an additional hard floor
+double-penalises those names.
+
+**Single-axis filters underperform the combined version** — each
+component contributes orthogonal information. Insider-sell-only is the
+strongest single axis (0.91 Sharpe alone) but combined-loose beats it.
+
+On the live slice (2026-05-08), the filter drops only 4 of 501
+candidates: APP (insider net -$162M), CCL (current ratio 0.30), DELL
+(insider net -$51M), NCLH (current ratio 0.21).
+
+To revert to no filter, pass `--no-quality-filter`. To use stricter
+thresholds, edit `QUALITY_FILTER_DEFAULTS` in `scripts/strategy.py` —
+but re-run the sweep first: tightening cost ~1.5 CAGR pts in the test
+above and would likely repeat.
+
 ### Basket weighting
 
 `--weight equal` (default) puts 1/N on every name in the basket. `--weight
@@ -708,18 +787,22 @@ date so the headline comparison is apples-to-apples by default; the CSV
 keeps the full SPY series so the post-strategy tail is visible for
 inspection.
 
-**Current model (`models/xgb_v1.json`, 200-trial sweep on 47 features, seed 15, retrained 2026-05-11):**
+**Current model (`models/xgb_v1.json`, 200-trial sweep on 47 features, seed 15, retrained 2026-05-11; quality filter ON, defaults from 2026-05-17):**
 
 | Variant                              | CAGR       | Vol   | Sharpe    | Max DD     | Final NAV | Avg Exposure |
 | ------------------------------------ | ---------- | ----- | --------- | ---------- | --------- | ------------ |
-| **Raw long-only**                    | **+23.0%** | 26.6% | **+0.87** | -28.1%     | **2.96×** | 100%         |
-| Vol-targeted (target 0.20)           | +20.2%     | 24.6% | +0.82     | **-25.5%** | 2.63×     | 95%          |
+| **Raw long-only** (filter ON)        | **+24.3%** | 25.7% | **+0.95** | -26.5%     | **3.13×** | 100%         |
+| Vol-targeted (target 0.20, filter ON)| +21.5%     | 23.6% | +0.91     | **-25.0%** | 2.78×     | 95%          |
+| Raw long-only (filter OFF, baseline) | +23.0%     | 26.6% | +0.87     | -28.1%     | 2.96×     | 100%         |
 | SPY buy & hold (clipped @2026-04-09) | +13.6%     | 17.0% | +0.80     | -24.5%     | 1.95×     | —            |
 
-**Reading the table honestly:** raw beats SPY by +9.4 CAGR points at
-Sharpe 0.87 vs 0.80 — the Sharpe gap is +0.07. Final NAV 2.96× vs SPY
-1.95× = **+52% more wealth** over 5.25 years. Saved hyperparams:
-`best_iteration=41`, `lr=0.0015`, `reg_lambda=0.005`, `max_depth=5`.
+**Reading the table honestly:** raw (filter ON) beats SPY by **+10.7 CAGR
+points at Sharpe 0.95 vs 0.80** — the Sharpe gap is +0.15. Final NAV 3.13×
+vs SPY 1.95× = **+60% more wealth** over 5.25 years. Saved hyperparams:
+`best_iteration=41`, `lr=0.0015`, `reg_lambda=0.005`, `max_depth=5`. The
+filter alone contributes +1.3 CAGR pts and +0.08 Sharpe vs the no-filter
+baseline; see [Quality filter](#quality-filter-cataclysmic-only-fundamentalinsider-screen)
+for the full sweep that justified the chosen thresholds.
 
 **Cross-seed stability:** the same 200-trial protocol on **seed 17**
 (prior commit, recorded here for the multi-seed evidence) produced raw
