@@ -28,6 +28,7 @@ this script is cron-friendly.
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -37,6 +38,12 @@ from glob import glob
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 PICKS_DIR = os.path.join(_ROOT, "picks")
+
+# Resolve `uv` to an absolute path. When launched from ~/.bashrc on shell
+# startup, ~/.local/bin may not be on PATH yet, so a bare "uv" in the step
+# subprocesses raises FileNotFoundError. Prefer PATH, fall back to the known
+# install location.
+_UV = shutil.which("uv") or os.path.expanduser("~/.local/bin/uv")
 
 PICKS_DATE_RE = re.compile(r"picks_(\d{4}-\d{2}-\d{2})\.csv$")
 
@@ -129,7 +136,7 @@ def main() -> int:
     if args.full:
         args.retrain = True
 
-    py = ["uv", "run", "python"]
+    py = [_UV, "run", "python"]
     steps: list[tuple[str, list[str]]] = []
 
     # Universe always runs first: re-pulls Wikipedia (~1s) so that the
