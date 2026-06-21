@@ -144,8 +144,14 @@ def load_history(rebuild: bool = False) -> pd.DataFrame:
     """
     os.makedirs(_UDIR, exist_ok=True)
 
+    # A run interrupted mid-write (e.g. laptop closed) can leave a 0-byte or
+    # truncated parquet. os.path.exists() is True for it, so without this guard
+    # we'd try to read it and crash on every subsequent run — bricking the
+    # daily job until the file is manually deleted. Treat an empty/unreadable
+    # file as missing so we rebuild from CSV instead.
     csv_changed = (
         not os.path.exists(HISTORY_FILE)
+        or os.path.getsize(HISTORY_FILE) == 0
         or os.path.getmtime(HISTORY_FILE) < os.path.getmtime(HISTORY_RAW)
     )
 
@@ -168,7 +174,11 @@ def load_history(rebuild: bool = False) -> pd.DataFrame:
             df = pd.concat([df, today_snap], ignore_index=True)
             df = df.sort_values(["date", "ticker"]).reset_index(drop=True)
 
-    df.to_parquet(HISTORY_FILE)
+    # Atomic write: a partial write lands on a temp file; the rename is atomic
+    # on POSIX, so HISTORY_FILE is never left 0-byte/truncated if interrupted.
+    _tmp = f"{HISTORY_FILE}.tmp"
+    df.to_parquet(_tmp)
+    os.replace(_tmp, HISTORY_FILE)
 
     n_synthetic = df.loc[df["date"] > max_csv_date, "date"].nunique()
     print(

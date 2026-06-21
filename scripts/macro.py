@@ -107,10 +107,33 @@ def fetch_macro(series_list: list[str] = MACRO_SERIES) -> pd.DataFrame:
             flush=True,
         )
 
+    # FRED can be unreachable from some networks (geo-blocking / rate-limits).
+    # These are slow-moving regime series, so a stale cache beats no picks:
+    # fall back to it on total failure, and on partial failure merge fetched
+    # columns into the cache so failed series keep their stale history instead
+    # of being dropped from the parquet.
+    cached = pd.read_parquet(MACRO_PATH) if os.path.exists(MACRO_PATH) else None
+
     if not cols:
-        raise SystemExit("No macro series downloaded; check connectivity.")
+        if cached is not None:
+            last = pd.to_datetime(cached.index).max().date()
+            print(
+                f"  WARNING: no series downloaded; keeping cached parquet "
+                f"(last date {last}).",
+                flush=True,
+            )
+            return cached
+        raise SystemExit("No macro series downloaded and no cache; check connectivity.")
 
     df = pd.concat(cols, axis=1).sort_index()
+    if cached is not None:
+        missing = [c for c in cached.columns if c not in df.columns]
+        if missing:
+            print(
+                f"  WARNING: {missing} failed; keeping their cached history.",
+                flush=True,
+            )
+            df = df.join(cached[missing], how="outer").sort_index()
     df.to_parquet(MACRO_PATH)
     print(
         f"\n  → {MACRO_PATH} ({len(df):,} rows × {len(df.columns)} cols)",

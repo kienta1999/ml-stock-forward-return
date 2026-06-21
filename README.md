@@ -98,7 +98,7 @@ filters and picks. Here we score and sort.
 | Label    | `forward_21d_return − date_mean(forward_21d_return)` — date-demeaned (cross-sectional excess). Raw `forward_21d_return` is clipped to ±0.5 first to cap dead-ticker outliers, then demeaned. The model can only learn within-date ordering, not market direction.                                                                                                                                                                  |
 | Split    | Train 2007–2017, Val 2018–2020, Test 2021→. Chronological. No shuffling.                                                                                                                                                                                                                                                                                                                                                           |
 | Model    | XGBoost regressor, RMSE loss, optuna-tuned on val decile spread (max_depth ∈ [3, 6], 100 trials, ES=100 rounds)                                                                                                                                                                                                                                                                                                                    |
-| Backtest | Long-only top-40 (after cataclysmic-only quality filter drops D/E>10 / CR<0.3 / sales_yoy<-0.50 / insider_net<-$50M), monthly rebalance, vol-targeted sizing overlay (`exposure = min(1.0, 0.20 / spy_vol_20d)`), 21 shifted-start offsets                                                                                                                                                                                       |
+| Backtest | Long-only top-40 (after cataclysmic-only quality filter drops D/E>10 / CR<0.3 / sales_yoy<-0.50 / insider_net<-$50M), monthly rebalance, vol-targeted sizing overlay (`exposure = min(1.0, 0.20 / spy_vol_20d)`), 21 shifted-start offsets                                                                                                                                                                                         |
 | Costs    | 5 bps per side on rebalance turnover                                                                                                                                                                                                                                                                                                                                                                                               |
 
 Every feature on row date=D uses only data observable at the close of D.
@@ -692,7 +692,7 @@ preserved in `strategy.py`; uncomment the `spy_sma200` line in
 ### Quality filter (cataclysmic-only fundamental/insider screen)
 
 Added 2026-05-17. `strategy.apply_quality_filter` runs once per rebalance
-date *before* `top_picks`, dropping candidates that hit any of these
+date _before_ `top_picks`, dropping candidates that hit any of these
 "firm-going-to-zero" thresholds:
 
 ```python
@@ -712,20 +712,20 @@ is opt-out via `--no-quality-filter` in both `backtest.py` and `today.py`.
 **Why these specific thresholds.** A 2026-05-17 sweep across 7 variants
 on the raw long-only backtest (21-offset mean):
 
-| Variant                    | Hits% | CAGR    | Sharpe | Max DD  |
-| -------------------------- | ----- | ------- | ------ | ------- |
-| no_filter (baseline)       |  0.0% | +23.02% |  0.87  | -28.14% |
+| Variant                          | Hits%     | CAGR        | Sharpe   | Max DD  |
+| -------------------------------- | --------- | ----------- | -------- | ------- |
+| no_filter (baseline)             | 0.0%      | +23.02%     | 0.87     | -28.14% |
 | **very_loose (current default)** | **10.8%** | **+24.29%** | **0.95** | -26.48% |
-| loose (D/E>7 etc.)         | 16.9% | +22.82% |  0.91  | -25.57% |
-| tight (D/E>3, CR<0.7)      | 33.9% | +19.53% |  0.82  | -24.52% |
-| very_tight (D/E>2, CR<1.0) | 52.7% | +17.58% |  0.79  | -23.08% |
-| only_insider_sell ≤-$20M   | 12.7% | +23.33% |  0.91  | -25.72% |
-| only_leverage_>5           |  3.7% | +22.27% |  0.84  | -29.16% |
-| only_liquidity_<0.5        |  2.4% | +22.65% |  0.86  | -27.73% |
-| only_sales_collapse_<-30%  |  5.3% | +22.86% |  0.88  | -28.36% |
+| loose (D/E>7 etc.)               | 16.9%     | +22.82%     | 0.91     | -25.57% |
+| tight (D/E>3, CR<0.7)            | 33.9%     | +19.53%     | 0.82     | -24.52% |
+| very_tight (D/E>2, CR<1.0)       | 52.7%     | +17.58%     | 0.79     | -23.08% |
+| only_insider_sell ≤-$20M         | 12.7%     | +23.33%     | 0.91     | -25.72% |
+| only*leverage*>5                 | 3.7%      | +22.27%     | 0.84     | -29.16% |
+| only*liquidity*<0.5              | 2.4%      | +22.65%     | 0.86     | -27.73% |
+| only*sales_collapse*<-30%        | 5.3%      | +22.86%     | 0.88     | -28.36% |
 
 **Key insight:** tighter filters DO reduce drawdown monotonically (lower
-vol, lower MaxDD as hit-rate climbs), but they kill CAGR *faster* than
+vol, lower MaxDD as hit-rate climbs), but they kill CAGR _faster_ than
 they help. The model already prices "merely weak" fundamentals via
 interactions with regime features — e.g. a tree splits on `vix_level > 25`
 then on `debt_to_equity_rank` and learns "high leverage underperforms
@@ -746,17 +746,17 @@ strongest single axis (0.91 Sharpe alone) but combined-loose beats it.
 
 **What gets dropped in practice (2026-05-08 live slice — 4 of 501 candidates):**
 
-| Ticker | Pred. 21d return | Trigger                         | Why it's "cataclysmic"                                                                                                                                                                                  |
-| ------ | ---------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| APP    | +0.16%           | `insider_net_60d = -$162.1M`    | AppLovin — insiders dumping more than 3× our $50M threshold over the trailing 60 days. The single largest insider-exit signal in the universe; people who can see the next quarter's pipeline are out. |
-| DELL   | +0.22%           | `insider_net_60d = -$51.5M`     | Just over the $50M threshold. Post-AI-rally cash-out; not as severe as APP but still flags "the people closest to the numbers are taking chips off the table."                                         |
-| CCL    | +0.16%           | `current_ratio = 0.30`          | Carnival Corp — only 30¢ of current assets per $1 of current liabilities. Post-COVID balance sheet is still broken; the cruise lines levered up to survive 2020 and haven't repaired liquidity.        |
-| NCLH   | +0.24%           | `current_ratio = 0.21`          | Norwegian Cruise Line — even worse than CCL at 21¢ per $1. A near-insolvent working-capital position on paper; one bad quarter from forced refinancing.                                                |
+| Ticker | Pred. 21d return | Trigger                      | Why it's "cataclysmic"                                                                                                                                                                                 |
+| ------ | ---------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| APP    | +0.16%           | `insider_net_60d = -$162.1M` | AppLovin — insiders dumping more than 3× our $50M threshold over the trailing 60 days. The single largest insider-exit signal in the universe; people who can see the next quarter's pipeline are out. |
+| DELL   | +0.22%           | `insider_net_60d = -$51.5M`  | Just over the $50M threshold. Post-AI-rally cash-out; not as severe as APP but still flags "the people closest to the numbers are taking chips off the table."                                         |
+| CCL    | +0.16%           | `current_ratio = 0.30`       | Carnival Corp — only 30¢ of current assets per $1 of current liabilities. Post-COVID balance sheet is still broken; the cruise lines levered up to survive 2020 and haven't repaired liquidity.        |
+| NCLH   | +0.24%           | `current_ratio = 0.21`       | Norwegian Cruise Line — even worse than CCL at 21¢ per $1. A near-insolvent working-capital position on paper; one bad quarter from forced refinancing.                                                |
 
 None of these have catastrophic `debt_to_equity` (>10) or
 `sales_growth_yoy < -0.50` — the universe in this regime is debt-managed
 and growing. The filter is doing its job: catching the few names whose
-*single* fundamental flag is in clear "this might go to zero" territory,
+_single_ fundamental flag is in clear "this might go to zero" territory,
 without touching the 99% of names where the model's interaction-based
 ranking should be trusted.
 
@@ -765,7 +765,7 @@ sales_yoy<-0.30, ROA<-0.20, insider_net<-$20M) dropped 9 of 501 — same
 4 names above plus AXON (insider -$24.9M, just over the old -$20M
 line), CHTR (CR 0.40), IT (D/E 9.3), LUV (CR 0.48), MRNA (ROA -27.8%).
 All five are debatable: MRNA is a development-stage biotech that
-*should* have negative ROA, CHTR and LUV operate in capital-intensive
+_should_ have negative ROA, CHTR and LUV operate in capital-intensive
 industries where 0.4–0.5 current ratios are normal, AXON's insider sale
 was post-rally profit-taking not a panic exit, and IT has carried high
 leverage through years of strong stock performance. Loosening the
@@ -812,12 +812,12 @@ inspection.
 
 **Current model (`models/xgb_v1.json`, 200-trial sweep on 47 features, seed 15, retrained 2026-05-11; quality filter ON, defaults from 2026-05-17):**
 
-| Variant                              | CAGR       | Vol   | Sharpe    | Max DD     | Final NAV | Avg Exposure |
-| ------------------------------------ | ---------- | ----- | --------- | ---------- | --------- | ------------ |
-| **Raw long-only** (filter ON)        | **+24.3%** | 25.7% | **+0.95** | -26.5%     | **3.13×** | 100%         |
-| Vol-targeted (target 0.20, filter ON)| +21.5%     | 23.6% | +0.91     | **-25.0%** | 2.78×     | 95%          |
-| Raw long-only (filter OFF, baseline) | +23.0%     | 26.6% | +0.87     | -28.1%     | 2.96×     | 100%         |
-| SPY buy & hold (clipped @2026-04-09) | +13.6%     | 17.0% | +0.80     | -24.5%     | 1.95×     | —            |
+| Variant                               | CAGR       | Vol   | Sharpe    | Max DD     | Final NAV | Avg Exposure |
+| ------------------------------------- | ---------- | ----- | --------- | ---------- | --------- | ------------ |
+| **Raw long-only** (filter ON)         | **+24.3%** | 25.7% | **+0.95** | -26.5%     | **3.13×** | 100%         |
+| Vol-targeted (target 0.20, filter ON) | +21.5%     | 23.6% | +0.91     | **-25.0%** | 2.78×     | 95%          |
+| Raw long-only (filter OFF, baseline)  | +23.0%     | 26.6% | +0.87     | -28.1%     | 2.96×     | 100%         |
+| SPY buy & hold (clipped @2026-04-09)  | +13.6%     | 17.0% | +0.80     | -24.5%     | 1.95×     | —            |
 
 **Reading the table honestly:** raw (filter ON) beats SPY by **+10.7 CAGR
 points at Sharpe 0.95 vs 0.80** — the Sharpe gap is +0.15. Final NAV 3.13×
@@ -1630,3 +1630,57 @@ claude --resume 7762f7ea-721e-4179-a24b-273d86c65f0e
 claude --resume 94d5520c-9a4b-460f-9e6d-b16cc80211b4
 claude --resume df27d2b6-5402-4381-89c2-89a7b3fb0d76 (insider)
 claude --resume 14ebc2c2-fe20-4ae5-8fc9-32d10b7ca9d6 (macro)
+claude --resume eabad73f-1806-46e5-99e1-4f4c8817d4ba (2026-06-20: outage fixes; net-issuance feature tested + reverted — uncommitted)
+
+Session 2026-06-20 summary (work tree NOT committed — review pending):
+
+1. Fixed ~10-day picks outage: data/universe/sp500_history.parquet was 0 bytes
+   (write interrupted ~Jun 3); every daily run since crashed reading it.
+   Deleted + rebuilt; universe.py now treats a 0-byte parquet as missing and
+   writes atomically (tmp + os.replace).
+2. macro.py: FRED unreachable from current network (fredgraph.csv times out;
+   geo-block/rate-limit suspected — api host responds, download host doesn't).
+   Now falls back to the cached macro.parquet on total failure and merges
+   partial fetches instead of dropping failed columns. Cache stale at
+   2026-06-01 — acceptable (slow-moving regime series).
+3. Quality-filter axis experiment — TESTED, REJECTED, REVERTED. Tried two new
+   cataclysmic axes on top of current defaults: shares_growth_yoy>25% (dilution)
+   and insolvency_flag (equity<=0 AND TTM NI<0, to cover the D/E-NaN-when-
+   equity<=0 blind spot). Sweep on raw long-only 21-offset (test → 2026-05-18):
+
+       variant            hits   CAGR     Sharpe  MaxDD
+       no_filter          0.0%  +26.02%   0.98   -27.64%
+       defaults (current) 6.4%  +26.35%   1.03   -26.88%   <- still best point
+       +dilution>25%      9.0%  +26.02%   1.04   -26.23%
+       +insolvency        6.9%  +26.10%   1.03   -26.44%
+       +both              9.5%  +25.88%   1.04   -25.65%
+
+   Both axes show the *tightening* signature (CAGR down monotonically with
+   hit-rate, MaxDD down, Sharpe flat at +0.01 noise) — NOT the cataclysmic-
+   Pareto signature the original 4 axes have (defaults raise CAGR 26.02->26.35
+   AND cut MaxDD). insolvency_flag's cost is the predicted false positive: it
+   drops buyback-driven negative-equity names (BA/MCD/HD-type) the model is
+   right to hold. Conclusion: QUALITY_FILTER_DEFAULTS unchanged; filter-axis
+   code + scripts/quality_axis_sweep.py reverted/deleted.
+4. Net-issuance (shares_growth_yoy) as a MODEL FEATURE — TESTED, DEAD, FULLY
+   REVERTED. Promoted shares_growth_yoy (Pontiff & Woodgate 2008, two-sided:
+   +dilution / -buybacks) to FUNDAMENTAL_FEATURES (47->48) and retrained
+   (50-trial). Result: 0.0 importance (rank 38/48) — the model never split on
+   it. The retrain also LANDED in the aggressive-shallow basin (best_iter=4,
+   lr=0.017) the README warns underperforms, so raw long-only fell 26.35% ->
+   23.39% CAGR vs the prior model on the same window — basin variance, not the
+   feature (feature was dead). NOTE the 0-importance is weakly conclusive: at
+   best_iter=4 only 4 trees grew, so 20/48 features show 0 importance incl.
+   known-good ones (book_to_market, insider counts). Verdict: net issuance does
+   not carry signal here in either filter OR feature form. Reverted features.py,
+   fundamentals.py, models/xgb_v1.json, and reports/ to HEAD; restored the prior
+   47-feature model. Working tree keepers: ONLY universe.py + macro.py.
+   TODO confirm: rerun backtest.py on the restored model to verify it matches
+   prior behavior before committing.
+
+Note (2026-06-20): the red TODO below claiming "do not run train.py --trials N"
+is STALE — train.py:267 objective is already the top-N mean-return metric the
+warning asked for (fixed 2026-05-10). Retraining is safe. Left the TODO text
+for history but it no longer blocks.
+
+claude --resume eabad73f-1806-46e5-99e1-4f4c8817d4ba
