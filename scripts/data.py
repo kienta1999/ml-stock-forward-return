@@ -276,7 +276,16 @@ def load_prices(
     out: dict[str, pd.DataFrame] = {}
     for t in tickers:
         df = _load_cached(t)
-        if df is None or len(df) < min_history:
+        if df is None:
+            continue
+        # yfinance occasionally emits a phantom bar with Volume but NaN OHLC
+        # (e.g. 2026-06-15). A single NaN poisons every rolling-window feature
+        # from that date forward (vol_20d, zscore, dist_sma200, beta_60d, …),
+        # which silently strands today.py on the last clean date. Drop these
+        # rows before they reach features; a dropped mid-series day is treated
+        # like a holiday by the pct_change/rolling logic.
+        df = df[df["Close"].notna()]
+        if len(df) < min_history:
             continue
         out[t] = df
     return out
