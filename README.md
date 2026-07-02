@@ -281,11 +281,85 @@ uv run python scripts/today.py --diff picks/picks_<yesterday>.csv
 
 The `--diff` flag prints a BUY / SELL / HOLD ticket — exactly which tickers
 to add or drop today vs the prior picks. That's the trade list you'd
-execute (manually or via Alpaca API).
+execute manually, or hand to `scripts/execute_picks.py` for automated
+placement on Interactive Brokers (see **Live execution (IBKR)** below).
 
 Output lands in `picks/picks_<latest_date>.csv` (one file per run;
 gitignored to keep daily noise out of git). Cash days produce an empty
 picks file. The script warns if the panel is more than 7 days old.
+
+### Live execution (IBKR)
+
+`scripts/execute_picks.py` turns a `picks/*.csv` into real orders on
+Interactive Brokers, reconciling against whatever the account already holds
+(a re-run after fills produces ~zero orders — it does **not** double-buy).
+It talks to a running **IB Gateway** (or TWS) via `ib_async`, not to IBKR's
+servers directly.
+
+**Prerequisite — the Gateway must be running and API-enabled.** Log in
+(paper account `DU…` first!), then **Configure → Settings → API → Settings**:
+turn **Read-Only API off**, note the socket port. IB Gateway has no "enable
+socket clients" checkbox (it's always on) — that's expected.
+
+Ports: `4002` = Gateway paper, `4001` = Gateway live, `7497`/`7496` = TWS
+paper/live.
+
+**WSL → Windows networking.** `127.0.0.1` inside WSL2 is *not* the Windows
+host. Two options:
+
+- **Mirrored (recommended):** put `networkingMode=mirrored` under `[wsl2]` in
+  `C:\Users\<you>\.wslconfig`, `wsl --shutdown`, reopen. Now `127.0.0.1` works
+  from WSL and Gateway's default `127.0.0.1` Trusted IP needs no change — and
+  it survives reboots. Pass `--host 127.0.0.1`.
+- **NAT (default):** the Windows host is the WSL default-route gateway
+  (`ip route show default`). Add the **WSL source IP** (`ip addr show eth0`) to
+  Gateway's Trusted IPs and uncheck "localhost only". ⚠️ That subnet **drifts
+  on reboot**, so re-check it. The scripts auto-detect the host side.
+
+Sanity-check the plumbing before any order code — `scripts/check_ibkr_conn.py`
+does a TCP probe, connects, and prints a **`DU` (paper) / `U` (live)** banner
+so paper vs. live is unmistakable:
+
+```bash
+uv run python scripts/check_ibkr_conn.py --port 4002        # paper (auto host)
+uv run python scripts/check_ibkr_conn.py --host 127.0.0.1   # mirrored networking
+```
+
+**Three modes, safest first — always dry-run before trading:**
+
+```bash
+# 1. print — client-side plan only, places NOTHING
+uv run python scripts/execute_picks.py --port 4002
+
+# 2. whatif — IBKR returns commission + margin per order, still places nothing
+uv run python scripts/execute_picks.py --port 4002 --mode whatif
+
+# 3. live — actually places orders (gated; see below)
+uv run python scripts/execute_picks.py --port 4001 --mode live --max-notional 10000
+```
+
+Sizing: `target_$ = weight * NetLiquidation * leverage`. The picks `weight`
+already bakes in the vol-target exposure, so `--leverage 1.0` (default) is
+cash-only and pays no margin interest. Key flags:
+
+| Flag              | What it does                                                                                   |
+| ----------------- | ---------------------------------------------------------------------------------------------- |
+| `--mode`          | `print` (default, safe) · `whatif` (cost preview) · `live` (places orders)                      |
+| `--fractional`    | Fractional-share orders so a small account deploys ~100% instead of stranding cash on pricey names that round to 0 whole shares. Needs fractional trading enabled; RTH only. |
+| `--leverage`      | Gross exposure multiplier (default 1.0 = cash-only). >1.0 borrows on margin (~5.14% APR).       |
+| `--max-notional`  | Hard circuit breaker on total BUY notional; abort if the plan exceeds it.                        |
+| `--min-order`     | Skip rebalances below this dollar value (default $100) to avoid churn.                           |
+| `--slippage-bps`  | Marketable-limit padding per side (default 30 bps).                                              |
+
+**Live-mode safety:** orders are marketable **limit** orders with `tif`/limit
+set explicitly (dodges the Gateway order-preset that trips error 10349 on bare
+market orders). Live mode enforces the `--max-notional` cap and, on a `U…`
+(live) account, requires you to type the exact account number to confirm.
+
+**Small-account caveat:** IBKR charges ~$1 flat per order. On a ~$10k / 40-name
+book that's ~$40 to enter (~40 bps), ~80 bps round-trip — vs the backtest's
+5 bps/side assumption. Concentrate (`today.py --top-n 15`) or size up to
+dilute the fixed cost.
 
 ### `data.py` CLI flags
 
@@ -670,7 +744,14 @@ cash_bucket_t = 1 - exposure_t                                  # returns 0
 
 Properties:
 
-- **No leverage** — exposure caps at 1.0. Only scales down, never up.
+- **No leverage by default** — exposure caps at 1.0, only scales down. Opt in
+  with `backtest.py --leverage 1.5`: the cap becomes
+  `min(leverage, vol_target / spy_vol)`, so you lever up in calm regimes but
+  the vol target still de-risks you in stress. Borrowed funds (gross > 1.0)
+  accrue margin interest daily at `--margin-rate` (default 5.14% APR = IBKR Pro
+  Tier I) so the reported CAGR nets out the cost of leverage. Leverage lifts
+  CAGR but **not** Sharpe (it scales return and vol together), and the vol-target
+  variant keeps its drawdown far tighter than the raw variant when levered.
 - **Triggered at rebalance** — exposure is recomputed every 21 trading days,
   not daily. Mid-hold vol spikes don't trigger an emergency sell; the
   overlay reacts at the next scheduled rebalance. For live use,
@@ -1130,6 +1211,8 @@ scripts/
   strategy.py                    # shared primitives (model load, regime gate, top picks)
   today.py                       # implemented — live picks for the most recent feature date
   run_all.py                     # implemented — daily orchestrator (data → features → labels → today)
+  execute_picks.py               # implemented — rebalance IBKR account toward a picks CSV (print/whatif/live)
+  check_ibkr_conn.py             # implemented — WSL→Gateway connection sanity check (prints DU/U banner)
 ```
 
 ---
