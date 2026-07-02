@@ -317,7 +317,7 @@ socket clients" checkbox (it's always on) — that's expected.
 Ports: `4002` = Gateway paper, `4001` = Gateway live, `7497`/`7496` = TWS
 paper/live.
 
-**WSL → Windows networking.** `127.0.0.1` inside WSL2 is *not* the Windows
+**WSL → Windows networking.** `127.0.0.1` inside WSL2 is _not_ the Windows
 host. Two options:
 
 - **Mirrored (recommended):** put `networkingMode=mirrored` under `[wsl2]` in
@@ -364,14 +364,14 @@ Sizing: `target_$ = weight * NetLiquidation * leverage`. The picks `weight`
 already bakes in the vol-target exposure, so `--leverage 1.0` (default) is
 cash-only and pays no margin interest. Key flags:
 
-| Flag              | What it does                                                                                   |
-| ----------------- | ---------------------------------------------------------------------------------------------- |
-| `--mode`          | `print` (default, safe) · `whatif` (cost preview) · `live` (places orders)                      |
-| `--fractional`    | Fractional-share orders so a small account deploys ~100% instead of stranding cash on pricey names that round to 0 whole shares. ⚠️ **IBKR frequently rejects fractional over the API** (error 10243/10244 — needs the fractional-shares permission enabled, and may be desktop-TWS-only). Verify with `--mode whatif` first. RTH only. |
-| `--leverage`      | Gross exposure multiplier (default 1.0 = cash-only). >1.0 borrows on margin (~5.14% APR).       |
-| `--max-notional`  | Hard circuit breaker on total BUY notional; abort if the plan exceeds it.                        |
-| `--min-order`     | Skip rebalances below this dollar value (default $100) to avoid churn.                           |
-| `--slippage-bps`  | Marketable-limit padding per side (default 30 bps).                                              |
+| Flag             | What it does                                                                                                                                                                                                                                                                                                                            |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--mode`         | `print` (default, safe) · `whatif` (cost preview) · `live` (places orders)                                                                                                                                                                                                                                                              |
+| `--fractional`   | Fractional-share orders so a small account deploys ~100% instead of stranding cash on pricey names that round to 0 whole shares. ⚠️ **IBKR frequently rejects fractional over the API** (error 10243/10244 — needs the fractional-shares permission enabled, and may be desktop-TWS-only). Verify with `--mode whatif` first. RTH only. |
+| `--leverage`     | Gross exposure multiplier (default 1.0 = cash-only). >1.0 borrows on margin (~5.14% APR).                                                                                                                                                                                                                                               |
+| `--max-notional` | Hard circuit breaker on total BUY notional; abort if the plan exceeds it.                                                                                                                                                                                                                                                               |
+| `--min-order`    | Skip rebalances below this dollar value (default $100) to avoid churn.                                                                                                                                                                                                                                                                  |
+| `--slippage-bps` | Marketable-limit padding per side (default 30 bps).                                                                                                                                                                                                                                                                                     |
 
 **Live-mode safety:** orders are marketable **limit** orders with `tif`/limit
 set explicitly (dodges the Gateway order-preset that trips error 10349 on bare
@@ -864,11 +864,11 @@ without touching the 99% of names where the model's interaction-based
 ranking should be trusted.
 
 For comparison, the **previous tight defaults** (D/E>5, CR<0.5,
-sales_yoy<-0.30, ROA<-0.20, insider_net<-$20M) dropped 9 of 501 — same
+sales*yoy<-0.30, ROA<-0.20, insider_net<-$20M) dropped 9 of 501 — same
 4 names above plus AXON (insider -$24.9M, just over the old -$20M
 line), CHTR (CR 0.40), IT (D/E 9.3), LUV (CR 0.48), MRNA (ROA -27.8%).
 All five are debatable: MRNA is a development-stage biotech that
-_should_ have negative ROA, CHTR and LUV operate in capital-intensive
+\_should* have negative ROA, CHTR and LUV operate in capital-intensive
 industries where 0.4–0.5 current ratios are normal, AXON's insider sale
 was post-rally profit-taking not a panic exit, and IT has carried high
 leverage through years of strong stock performance. Loosening the
@@ -1739,49 +1739,50 @@ claude --resume eabad73f-1806-46e5-99e1-4f4c8817d4ba (2026-06-20: outage fixes; 
 
 Session 2026-06-20 summary (work tree NOT committed — review pending):
 
-1. Fixed ~10-day picks outage: data/universe/sp500_history.parquet was 0 bytes
-   (write interrupted ~Jun 3); every daily run since crashed reading it.
-   Deleted + rebuilt; universe.py now treats a 0-byte parquet as missing and
-   writes atomically (tmp + os.replace).
-2. macro.py: FRED unreachable from current network (fredgraph.csv times out;
-   geo-block/rate-limit suspected — api host responds, download host doesn't).
-   Now falls back to the cached macro.parquet on total failure and merges
-   partial fetches instead of dropping failed columns. Cache stale at
-   2026-06-01 — acceptable (slow-moving regime series).
-3. Quality-filter axis experiment — TESTED, REJECTED, REVERTED. Tried two new
-   cataclysmic axes on top of current defaults: shares_growth_yoy>25% (dilution)
-   and insolvency_flag (equity<=0 AND TTM NI<0, to cover the D/E-NaN-when-
-   equity<=0 blind spot). Sweep on raw long-only 21-offset (test → 2026-05-18):
+1.  Fixed ~10-day picks outage: data/universe/sp500_history.parquet was 0 bytes
+    (write interrupted ~Jun 3); every daily run since crashed reading it.
+    Deleted + rebuilt; universe.py now treats a 0-byte parquet as missing and
+    writes atomically (tmp + os.replace).
+2.  macro.py: FRED unreachable from current network (fredgraph.csv times out;
+    geo-block/rate-limit suspected — api host responds, download host doesn't).
+    Now falls back to the cached macro.parquet on total failure and merges
+    partial fetches instead of dropping failed columns. Cache stale at
+    2026-06-01 — acceptable (slow-moving regime series).
+3.  Quality-filter axis experiment — TESTED, REJECTED, REVERTED. Tried two new
+    cataclysmic axes on top of current defaults: shares_growth_yoy>25% (dilution)
+    and insolvency_flag (equity<=0 AND TTM NI<0, to cover the D/E-NaN-when-
+    equity<=0 blind spot). Sweep on raw long-only 21-offset (test → 2026-05-18):
 
-       variant            hits   CAGR     Sharpe  MaxDD
-       no_filter          0.0%  +26.02%   0.98   -27.64%
-       defaults (current) 6.4%  +26.35%   1.03   -26.88%   <- still best point
-       +dilution>25%      9.0%  +26.02%   1.04   -26.23%
-       +insolvency        6.9%  +26.10%   1.03   -26.44%
-       +both              9.5%  +25.88%   1.04   -25.65%
+        variant            hits   CAGR     Sharpe  MaxDD
+        no_filter          0.0%  +26.02%   0.98   -27.64%
+        defaults (current) 6.4%  +26.35%   1.03   -26.88%   <- still best point
+        +dilution>25%      9.0%  +26.02%   1.04   -26.23%
+        +insolvency        6.9%  +26.10%   1.03   -26.44%
+        +both              9.5%  +25.88%   1.04   -25.65%
 
-   Both axes show the *tightening* signature (CAGR down monotonically with
-   hit-rate, MaxDD down, Sharpe flat at +0.01 noise) — NOT the cataclysmic-
-   Pareto signature the original 4 axes have (defaults raise CAGR 26.02->26.35
-   AND cut MaxDD). insolvency_flag's cost is the predicted false positive: it
-   drops buyback-driven negative-equity names (BA/MCD/HD-type) the model is
-   right to hold. Conclusion: QUALITY_FILTER_DEFAULTS unchanged; filter-axis
-   code + scripts/quality_axis_sweep.py reverted/deleted.
-4. Net-issuance (shares_growth_yoy) as a MODEL FEATURE — TESTED, DEAD, FULLY
-   REVERTED. Promoted shares_growth_yoy (Pontiff & Woodgate 2008, two-sided:
-   +dilution / -buybacks) to FUNDAMENTAL_FEATURES (47->48) and retrained
-   (50-trial). Result: 0.0 importance (rank 38/48) — the model never split on
-   it. The retrain also LANDED in the aggressive-shallow basin (best_iter=4,
-   lr=0.017) the README warns underperforms, so raw long-only fell 26.35% ->
-   23.39% CAGR vs the prior model on the same window — basin variance, not the
-   feature (feature was dead). NOTE the 0-importance is weakly conclusive: at
-   best_iter=4 only 4 trees grew, so 20/48 features show 0 importance incl.
-   known-good ones (book_to_market, insider counts). Verdict: net issuance does
-   not carry signal here in either filter OR feature form. Reverted features.py,
-   fundamentals.py, models/xgb_v1.json, and reports/ to HEAD; restored the prior
-   47-feature model. Working tree keepers: ONLY universe.py + macro.py.
-   TODO confirm: rerun backtest.py on the restored model to verify it matches
-   prior behavior before committing.
+    Both axes show the _tightening_ signature (CAGR down monotonically with
+    hit-rate, MaxDD down, Sharpe flat at +0.01 noise) — NOT the cataclysmic-
+    Pareto signature the original 4 axes have (defaults raise CAGR 26.02->26.35
+    AND cut MaxDD). insolvency_flag's cost is the predicted false positive: it
+    drops buyback-driven negative-equity names (BA/MCD/HD-type) the model is
+    right to hold. Conclusion: QUALITY_FILTER_DEFAULTS unchanged; filter-axis
+    code + scripts/quality_axis_sweep.py reverted/deleted.
+
+4.  Net-issuance (shares_growth_yoy) as a MODEL FEATURE — TESTED, DEAD, FULLY
+    REVERTED. Promoted shares_growth_yoy (Pontiff & Woodgate 2008, two-sided:
+    +dilution / -buybacks) to FUNDAMENTAL_FEATURES (47->48) and retrained
+    (50-trial). Result: 0.0 importance (rank 38/48) — the model never split on
+    it. The retrain also LANDED in the aggressive-shallow basin (best_iter=4,
+    lr=0.017) the README warns underperforms, so raw long-only fell 26.35% ->
+    23.39% CAGR vs the prior model on the same window — basin variance, not the
+    feature (feature was dead). NOTE the 0-importance is weakly conclusive: at
+    best_iter=4 only 4 trees grew, so 20/48 features show 0 importance incl.
+    known-good ones (book_to_market, insider counts). Verdict: net issuance does
+    not carry signal here in either filter OR feature form. Reverted features.py,
+    fundamentals.py, models/xgb_v1.json, and reports/ to HEAD; restored the prior
+    47-feature model. Working tree keepers: ONLY universe.py + macro.py.
+    TODO confirm: rerun backtest.py on the restored model to verify it matches
+    prior behavior before committing.
 
 Note (2026-06-20): the red TODO below claiming "do not run train.py --trials N"
 is STALE — train.py:267 objective is already the top-N mean-return metric the
@@ -1789,3 +1790,4 @@ warning asked for (fixed 2026-05-10). Retraining is safe. Left the TODO text
 for history but it no longer blocks.
 
 claude --resume eabad73f-1806-46e5-99e1-4f4c8817d4ba
+Live ibkr place trade: claude --resume 86203dd8-11fa-43ed-a889-a7213c2e3af3
