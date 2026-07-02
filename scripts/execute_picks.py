@@ -237,10 +237,11 @@ def main() -> None:
     ap.add_argument("--slippage-bps", type=float, default=30.0,
                     help="Marketable-limit padding per side (default 30 bps).")
     ap.add_argument("--fractional", action="store_true",
-                    help="Place fractional-share orders (IBKR cashQty-style float "
-                         "quantities) so a small account deploys ~100%% instead of "
-                         "stranding cash on pricey names. Account must have "
-                         "fractional trading enabled; fractional trades RTH only.")
+                    help="Fractional-share orders so a small account deploys ~100%% "
+                         "instead of stranding cash on pricey names. NOTE: IBKR often "
+                         "REJECTS fractional over the API (error 10243/10244) — it "
+                         "needs the fractional-shares permission enabled and may be "
+                         "desktop-TWS-only. Verify with --mode whatif first. RTH only.")
     ap.add_argument("--min-order", type=float, default=100.0,
                     help="Skip rebalances below this dollar value (default $100).")
     ap.add_argument("--max-notional", type=float, default=None,
@@ -352,19 +353,28 @@ def main() -> None:
         if args.mode == "whatif":
             print("\n[whatif mode] IBKR preview — NOTHING will be placed:")
             total_comm = 0.0
+            n_ok = 0
             for tkr, contract, order in order_specs:
                 st = ib.whatIfOrder(contract, order)
                 comm = getattr(st, "commission", None)
                 if comm is not None and comm == comm:
                     total_comm += float(comm)
+                    n_ok += 1
                     print(f"  {tkr:<6} {order.action:<4} {order.totalQuantity:>8.4g} "
                           f"@ {order.lmtPrice:<9.2f} comm≈{float(comm):.2f} "
                           f"initMargin→{getattr(st, 'initMarginAfter', '?')}")
                 else:
                     print(f"  {tkr:<6} {order.action:<4} {order.totalQuantity:>8.4g} "
                           f"@ {order.lmtPrice:<9.2f} (no preview returned)")
-            print(f"\n  Est. total commission: ${total_comm:,.2f}  "
-                  f"({total_comm / equity * 1e4:.1f} bps of equity)")
+            n_fail = len(order_specs) - n_ok
+            if n_ok:
+                print(f"\n  Est. total commission ({n_ok} previews): "
+                      f"${total_comm:,.2f} ({total_comm / equity * 1e4:.1f} bps of equity)")
+            if n_fail:
+                print(f"  ⚠ {n_fail}/{len(order_specs)} order(s) returned NO preview — "
+                      f"rejected by IBKR (commonly fractional-via-API: error 10243/10244, "
+                      f"needs fractional permission or the desktop TWS). The $ above "
+                      f"EXCLUDES them, so it is not the full basket cost.")
             print("  Open orders queued:", len(ib.openTrades()), "(should be 0)")
             return
 

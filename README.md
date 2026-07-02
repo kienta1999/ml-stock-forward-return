@@ -351,8 +351,9 @@ uv run python scripts/execute_picks.py --port 4001
 # 2. whatif — IBKR returns commission + margin per order, still places nothing
 uv run python scripts/execute_picks.py --port 4001 --mode whatif
 
-# add --fractional to any mode so a small account deploys ~100% (whole shares
-# otherwise strand ~half your cash on pricey names that round to 0):
+# --fractional deploys ~100% on a small account, BUT IBKR often rejects
+# fractional over the API (error 10243/10244); verify with whatif before trusting it.
+# Reliable alternative on a small account: fewer names — today.py --top-n 15.
 uv run python scripts/execute_picks.py --port 4001 --mode whatif --fractional
 
 # 3. live — actually places orders (gated; see below)
@@ -366,7 +367,7 @@ cash-only and pays no margin interest. Key flags:
 | Flag              | What it does                                                                                   |
 | ----------------- | ---------------------------------------------------------------------------------------------- |
 | `--mode`          | `print` (default, safe) · `whatif` (cost preview) · `live` (places orders)                      |
-| `--fractional`    | Fractional-share orders so a small account deploys ~100% instead of stranding cash on pricey names that round to 0 whole shares. Needs fractional trading enabled; RTH only. |
+| `--fractional`    | Fractional-share orders so a small account deploys ~100% instead of stranding cash on pricey names that round to 0 whole shares. ⚠️ **IBKR frequently rejects fractional over the API** (error 10243/10244 — needs the fractional-shares permission enabled, and may be desktop-TWS-only). Verify with `--mode whatif` first. RTH only. |
 | `--leverage`      | Gross exposure multiplier (default 1.0 = cash-only). >1.0 borrows on margin (~5.14% APR).       |
 | `--max-notional`  | Hard circuit breaker on total BUY notional; abort if the plan exceeds it.                        |
 | `--min-order`     | Skip rebalances below this dollar value (default $100) to avoid churn.                           |
