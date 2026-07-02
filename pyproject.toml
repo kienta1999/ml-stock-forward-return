@@ -17,6 +17,7 @@ dependencies = [
     "requests>=2.31",
     "tqdm>=4.66",
     "lxml>=5.0",
+    "ib-async>=2.1.0",
 ]
 
 [tool.uv]

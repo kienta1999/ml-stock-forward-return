@@ -50,6 +50,12 @@ VIX_THRESHOLD = 25.0
 DEFAULT_VOL_TARGET = 0.20
 VOL_LOOKBACK = 20
 
+# Annual margin interest rate charged on borrowed funds (gross exposure > 1.0).
+# IBKR Pro USD Tier I (< $100k borrowed) = 5.14% APR as of 2026-06-15. Used by
+# the backtest --leverage path and execute_picks.py to cost leverage honestly:
+# leverage is not free, and on a small account the borrow drag is material.
+DEFAULT_MARGIN_RATE = 0.0514
+
 WEIGHT_MODES = ("equal", "pred")
 DEFAULT_WEIGHT_MODE = "equal"
 
@@ -147,21 +153,29 @@ def regime_long_row(
 
 
 def vol_target_exposure(
-    spy_vol: float, target: float = DEFAULT_VOL_TARGET
+    spy_vol: float,
+    target: float = DEFAULT_VOL_TARGET,
+    max_exposure: float = 1.0,
 ) -> float:
-    """Map SPY realized vol → portfolio exposure ∈ [0, 1].
+    """Map SPY realized vol → portfolio exposure ∈ [0, max_exposure].
 
-    No leverage cap > 1.0 — the overlay only scales *down* when volatility
-    rises above the target. NaN spy_vol (during the 20-day warmup) returns
-    1.0 so backtests start fully invested.
+    The overlay scales *down* when volatility rises above the target. The
+    `max_exposure` cap (default 1.0 = no leverage) is the ceiling in calm
+    regimes: pass >1.0 to lever up when vol is low while still letting the
+    vol target pull exposure back below 1.0 in stress. NaN spy_vol (during
+    the 20-day warmup) returns `max_exposure` so backtests start fully sized.
 
-    Calm market (SPY vol ≈ 15%): exposure = 1.0 (full)
-    Stressed (SPY vol ≈ 30%):     exposure ≈ 0.67
-    Crisis (SPY vol ≈ 45%):       exposure ≈ 0.44
+    With max_exposure=1.0 (default):
+        Calm market (SPY vol ≈ 15%): exposure = 1.0 (full)
+        Stressed (SPY vol ≈ 30%):     exposure ≈ 0.67
+        Crisis (SPY vol ≈ 45%):       exposure ≈ 0.44
+    With max_exposure=1.5 (leverage):
+        Calm market (SPY vol ≈ 13%): exposure = 1.5 (levered)
+        Stressed (SPY vol ≈ 30%):     exposure ≈ 0.67 (target still binds)
     """
     if pd.isna(spy_vol) or spy_vol <= 0:
-        return 1.0
-    return min(1.0, float(target) / float(spy_vol))
+        return max_exposure
+    return min(max_exposure, float(target) / float(spy_vol))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

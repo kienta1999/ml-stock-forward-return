@@ -25,7 +25,15 @@ Variants reported:
     2. Long-only + vol-target overlay (the proposed strategy)
     3. Long-only, raw / no overlay (diagnostic — always 100% exposed)
 
-Costs: 5 bps per side on rebalance turnover.
+Leverage (--leverage, default 1.0 = cash-only):
+    Raises the exposure ceiling above 1.0. In the vol-target variant the cap
+    becomes min(leverage, vol_target/spy_vol) — you lever up in calm regimes
+    but the vol target still de-risks you in stress. In the raw variant it is
+    a flat `leverage`× gross. Borrowed funds (gross exposure > 1.0) are charged
+    margin interest daily at --margin-rate (default 5.14% APR, IBKR Pro Tier I)
+    so the reported CAGR nets out the cost of leverage.
+
+Costs: 5 bps per side on rebalance turnover; margin interest on any borrow.
 Execution: trade at close of rebalance day (assumes MOC orders work).
 
 Outputs:
@@ -104,16 +112,22 @@ def run_one_offset(
     vol_target: float,
     weight_mode: str,
     quality_filter_on: bool,
+    leverage: float,
+    margin_rate: float,
 ) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
     """Single backtest with rebalances on day `offset`, `offset+hold_days`, ....
 
     Returns (equity, in_market, holdings, exposure_series).
 
     `vol_target_on=True` enables the vol-target overlay (default "gated"
-    behavior): exposure = min(1.0, vol_target / spy_vol_20d) at each
-    rebalance. `vol_target_on=False` is the raw variant — always 100%
+    behavior): exposure = min(leverage, vol_target / spy_vol_20d) at each
+    rebalance. `vol_target_on=False` is the raw variant — flat `leverage`×
     exposed. `holdings` is comma-separated tickers (or "" when fully in
     cash) for the auditing CSV.
+
+    When gross exposure exceeds 1.0 (leverage), the borrowed fraction accrues
+    margin interest every held day at `margin_rate` / 252, so the equity curve
+    nets out the financing cost of leverage.
     """
     weights: dict[str, float] = {}
     equity = 1.0
@@ -131,15 +145,25 @@ def run_one_offset(
             pf_ret = sum(w * ret_map.get(t, 0.0) for t, w in weights.items())
             equity *= 1.0 + pf_ret
 
+        # 1b. Charge margin interest on any borrowed fraction (gross > 1.0).
+        # Weights are fixed between rebalances, so their sum == the gross
+        # exposure set at the last rebalance. Accrues every held day.
+        if weights:
+            borrowed = sum(weights.values()) - 1.0
+            if borrowed > 0.0:
+                equity *= 1.0 - borrowed * margin_rate / PERIODS_PER_YEAR
+
         # 2. Rebalance day?
         is_rebalance = (i >= offset) and ((i - offset) % hold_days == 0)
         if is_rebalance:
-            # Vol-target exposure ∈ [0, 1]; raw variant pins to 1.0.
+            # Vol-target exposure ∈ [0, leverage]; raw variant pins to leverage.
             if vol_target_on and date in market.index:
                 spy_vol = market.loc[date, "spy_vol_20d"]
-                exposure = strategy.vol_target_exposure(spy_vol, vol_target)
+                exposure = strategy.vol_target_exposure(
+                    spy_vol, vol_target, max_exposure=leverage
+                )
             else:
-                exposure = 1.0
+                exposure = leverage
 
             if exposure > 0 and date in by_date:
                 day = by_date[date]
@@ -183,6 +207,8 @@ def run_shifted_starts(
     vol_target: float,
     weight_mode: str,
     quality_filter_on: bool,
+    leverage: float,
+    margin_rate: float,
 ) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series]:
     """Run `hold_days` backtests at different rebalance offsets.
 
@@ -215,6 +241,7 @@ def run_shifted_starts(
             cost_per_side=cost_per_side, vol_target=vol_target,
             weight_mode=weight_mode,
             quality_filter_on=quality_filter_on,
+            leverage=leverage, margin_rate=margin_rate,
         )
         curves[offset] = eq
         tim[offset] = float(inm.mean())
@@ -335,6 +362,24 @@ def main() -> None:
     ap.add_argument("--no-overlay", action="store_true",
                     help="Skip the vol-target variant (only run raw long-only + SPY).")
     ap.add_argument(
+        "--leverage", type=float, default=1.0,
+        help=(
+            "Gross exposure ceiling (default 1.0 = cash-only, no borrow). "
+            ">1.0 levers up: the vol-target variant caps at "
+            "min(leverage, vol_target/spy_vol) so stress still de-risks; the "
+            "raw variant runs a flat leverage× gross. Borrowed funds accrue "
+            "margin interest at --margin-rate. Try 1.2 / 1.5 for torque."
+        ),
+    )
+    ap.add_argument(
+        "--margin-rate", type=float, default=strategy.DEFAULT_MARGIN_RATE,
+        help=(
+            "Annual margin interest on borrowed funds when leverage > 1.0 "
+            f"(default {strategy.DEFAULT_MARGIN_RATE:.4f} = IBKR Pro Tier I). "
+            "Charged daily on the gross-minus-1 fraction."
+        ),
+    )
+    ap.add_argument(
         "--no-quality-filter",
         action="store_true",
         help=(
@@ -374,26 +419,29 @@ def main() -> None:
     gated_holdings: pd.Series | None = None
     gated_avg_exp: pd.Series | None = None
     qf_label = "ON" if quality_filter_on else "OFF"
+    lev_label = f", leverage={args.leverage:.2f}x" if args.leverage != 1.0 else ""
     if not args.no_overlay:
         print(f"Running long-only WITH vol-target overlay "
               f"(target={args.vol_target:.2f}, {args.hold_days} offsets, "
-              f"weight={args.weight}, quality_filter={qf_label})...")
+              f"weight={args.weight}, quality_filter={qf_label}{lev_label})...")
         gated_curves, gated_tim, gated_holdings, gated_avg_exp = run_shifted_starts(
             test_panel, market,
             vol_target_on=True, top_n=args.top_n, hold_days=args.hold_days,
             cost_per_side=cost_per_side, vol_target=args.vol_target,
             weight_mode=args.weight,
             quality_filter_on=quality_filter_on,
+            leverage=args.leverage, margin_rate=args.margin_rate,
         )
 
     print(f"Running long-only RAW / no overlay ({args.hold_days} offsets, "
-          f"weight={args.weight}, quality_filter={qf_label})...")
+          f"weight={args.weight}, quality_filter={qf_label}{lev_label})...")
     raw_curves, _, raw_holdings, _ = run_shifted_starts(
         test_panel, market,
         vol_target_on=False, top_n=args.top_n, hold_days=args.hold_days,
         cost_per_side=cost_per_side, vol_target=args.vol_target,
         weight_mode=args.weight,
         quality_filter_on=quality_filter_on,
+        leverage=args.leverage, margin_rate=args.margin_rate,
     )
 
     test_start = pd.Timestamp(test_panel["date"].min())
@@ -428,6 +476,17 @@ def main() -> None:
     stats["spy_buy_hold"] = compute_stats(spy_eq)
     stats["spy_buy_hold"]["end_date"] = str(strategy_end.date())
 
+    stats["config"] = {
+        "top_n": args.top_n,
+        "hold_days": args.hold_days,
+        "cost_bps": args.cost_bps,
+        "vol_target": args.vol_target,
+        "weight_mode": args.weight,
+        "quality_filter": quality_filter_on,
+        "leverage": args.leverage,
+        "margin_rate": args.margin_rate,
+    }
+
     os.makedirs(REPORTS_DIR, exist_ok=True)
     with open(os.path.join(REPORTS_DIR, "backtest_stats.json"), "w") as f:
         json.dump(stats, f, indent=2)
@@ -454,6 +513,9 @@ def main() -> None:
         )
 
     print("\nBacktest summary:")
+    if args.leverage != 1.0:
+        print(f"  (leverage {args.leverage:.2f}x, borrow @ {args.margin_rate:.2%} APR "
+              f"charged on gross > 1.0)")
     if "gated_long_only" in stats:
         s = stats["gated_long_only"]
         extra = (f"  AvgExp={s['avg_exposure']:.0%}  "
