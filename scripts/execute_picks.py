@@ -24,8 +24,9 @@ Sizing:
     interest. --leverage > 1.0 borrows and is flagged loudly (IBKR Pro ~5.14%).
 
 Networking (WSL -> Windows Gateway): host auto-detected from the WSL default
-route unless --host is given. Port defaults to 4002 (Gateway PAPER); pass
---port 4001 for the live gateway. See scripts/check_ibkr_conn.py first.
+route unless --host is given. --port is REQUIRED, no default (4002 = paper,
+4001 = live) so the live/paper choice is always explicit. See
+scripts/check_ibkr_conn.py first.
 
 CLI:
     uv run python scripts/execute_picks.py --port 4001                 # print plan (safe)
@@ -223,8 +224,9 @@ def main() -> None:
                     help="Picks CSV. Default: latest picks/picks_*.csv.")
     ap.add_argument("--host", default=None,
                     help="Gateway host. Default: auto-detect WSL->Windows gateway.")
-    ap.add_argument("--port", type=int, default=4002,
-                    help="API port (4002 = Gateway paper [default], 4001 = live).")
+    ap.add_argument("--port", type=int, required=True,
+                    help="API port — REQUIRED, no default (4002 = Gateway paper, "
+                         "4001 = live) so live vs. paper is always a conscious choice.")
     ap.add_argument("--client-id", type=int, default=20)
     ap.add_argument("--mode", choices=("print", "whatif", "live"), default="print",
                     help="print = plan only (safe); whatif = cost preview; "

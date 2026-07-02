@@ -201,10 +201,11 @@ uv run python scripts/run_all.py --download-only  # raw-data refresh only — us
 uv run python scripts/run_all.py --dry-run        # print plan, don't execute
 
 # ── Live execution on Interactive Brokers — see "Live execution (IBKR)" below ──
-uv run python scripts/check_ibkr_conn.py --port 4002                 # sanity-check WSL→Gateway; prints DU/U (paper/live) banner
-uv run python scripts/execute_picks.py --port 4002                   # print rebalance plan only — places NOTHING (safe)
-uv run python scripts/execute_picks.py --port 4002 --mode whatif     # IBKR commission/margin preview — still places nothing
-uv run python scripts/execute_picks.py --port 4002 --fractional      # deploy ~100% of a small account (fractional shares)
+# --port is REQUIRED (4001 = live account, 4002 = paper). Examples use 4001 (always-live setup).
+uv run python scripts/check_ibkr_conn.py --port 4001                 # sanity-check WSL→Gateway; prints DU/U (paper/live) banner
+uv run python scripts/execute_picks.py --port 4001                   # print rebalance plan only — places NOTHING (safe)
+uv run python scripts/execute_picks.py --port 4001 --mode whatif     # IBKR commission/margin preview — still places nothing
+uv run python scripts/execute_picks.py --port 4001 --fractional      # deploy ~100% of a small account (fractional shares)
 uv run python scripts/execute_picks.py --port 4001 --mode live --max-notional 10000  # ⚠️ places real orders (gated by cap + typed confirm)
 ```
 
@@ -332,19 +333,27 @@ Sanity-check the plumbing before any order code — `scripts/check_ibkr_conn.py`
 does a TCP probe, connects, and prints a **`DU` (paper) / `U` (live)** banner
 so paper vs. live is unmistakable:
 
+`--port` is **required** (no default) so live vs. paper is always a conscious
+choice — `4001` = live, `4002` = paper. Examples below use `4001` (always-live
+setup); swap to `4002` if you log the Gateway into a paper `DU…` account.
+
 ```bash
-uv run python scripts/check_ibkr_conn.py --port 4002        # paper (auto host)
-uv run python scripts/check_ibkr_conn.py --host 127.0.0.1   # mirrored networking
+uv run python scripts/check_ibkr_conn.py --port 4001        # live (auto host)
+uv run python scripts/check_ibkr_conn.py --host 127.0.0.1 --port 4001   # mirrored networking
 ```
 
 **Three modes, safest first — always dry-run before trading:**
 
 ```bash
 # 1. print — client-side plan only, places NOTHING
-uv run python scripts/execute_picks.py --port 4002
+uv run python scripts/execute_picks.py --port 4001
 
 # 2. whatif — IBKR returns commission + margin per order, still places nothing
-uv run python scripts/execute_picks.py --port 4002 --mode whatif
+uv run python scripts/execute_picks.py --port 4001 --mode whatif
+
+# add --fractional to any mode so a small account deploys ~100% (whole shares
+# otherwise strand ~half your cash on pricey names that round to 0):
+uv run python scripts/execute_picks.py --port 4001 --mode whatif --fractional
 
 # 3. live — actually places orders (gated; see below)
 uv run python scripts/execute_picks.py --port 4001 --mode live --max-notional 10000
