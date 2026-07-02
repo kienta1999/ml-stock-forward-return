@@ -185,6 +185,7 @@ uv run python scripts/backtest.py --no-quality-filter # disable the cataclysmic-
 uv run python scripts/backtest.py --top-n 25         # tighter pick (default 40)
 uv run python scripts/backtest.py --vol-target 0.15  # more aggressive de-risk (default 0.20)
 uv run python scripts/backtest.py --weight pred      # weight basket by predicted_return (default: equal); see "Basket weighting" below
+uv run python scripts/backtest.py --leverage 1.5     # lever up (default 1.0 = cash-only); borrow charged at 5.14% APR — see "Vol-target overlay"
 
 uv run python scripts/today.py                                   # latest-date picks (vol-target sizing + quality filter + top 40)
 uv run python scripts/today.py --diff picks/picks_YYYY-MM-DD.csv # buy/sell list vs that prior file
@@ -198,7 +199,18 @@ uv run python scripts/run_all.py --retrain        # also: train + backtest (use 
 uv run python scripts/run_all.py --full           # alias for --retrain (universe refreshes on every run)
 uv run python scripts/run_all.py --download-only  # raw-data refresh only — useful if you want to defer features/labels/picks
 uv run python scripts/run_all.py --dry-run        # print plan, don't execute
+
+# ── Live execution on Interactive Brokers — see "Live execution (IBKR)" below ──
+uv run python scripts/check_ibkr_conn.py --port 4002                 # sanity-check WSL→Gateway; prints DU/U (paper/live) banner
+uv run python scripts/execute_picks.py --port 4002                   # print rebalance plan only — places NOTHING (safe)
+uv run python scripts/execute_picks.py --port 4002 --mode whatif     # IBKR commission/margin preview — still places nothing
+uv run python scripts/execute_picks.py --port 4002 --fractional      # deploy ~100% of a small account (fractional shares)
+uv run python scripts/execute_picks.py --port 4001 --mode live --max-notional 10000  # ⚠️ places real orders (gated by cap + typed confirm)
 ```
+
+> **Automating orders?** See **### Live execution (IBKR)** below for Gateway
+> setup, WSL↔Windows networking, the print → whatif → live workflow, and the
+> full flag table.
 
 ### Daily live-picks workflow
 
