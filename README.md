@@ -774,6 +774,18 @@ Properties:
   Tier I) so the reported CAGR nets out the cost of leverage. Leverage lifts
   CAGR but **not** Sharpe (it scales return and vol together), and the vol-target
   variant keeps its drawdown far tighter than the raw variant when levered.
+- **Chosen live setting: `--leverage 1.35`.** Picked for margin-call safety on a
+  small Reg-T account (IBKR portfolio margin needs $110k; below that, maintenance
+  = 25%), not drawdown comfort. Max leverage that survives a basket drop `d`
+  without a Reg-T call is `L = 1 / (d + 0.25·(1−d))`; inverting for L=1.35 gives a
+  margin-call threshold of `d ≈ 65%` (holdings would have to fall ~65% within a
+  single 21-day hold — vs our unlevered −53% full-cycle MaxDD). At the call point
+  account equity is down ~88% (equity drop = L·d). Note: volatile/concentrated
+  small-caps often carry 30% house maintenance, which tightens the threshold to
+  ~63%. The backtest does **not** model forced liquidation — it rides equity
+  through the trough — so these thresholds are the real-world guardrail, not the
+  reported CAGR. Vol-target is run purely as call-insurance here: it cuts exposure
+  when SPY vol spikes, so nameplate 1.35× spends a crash at effective <1.35×.
 - **Triggered at rebalance** — exposure is recomputed every 21 trading days,
   not daily. Mid-hold vol spikes don't trigger an emergency sell; the
   overlay reacts at the next scheduled rebalance. For live use,
