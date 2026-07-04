@@ -185,7 +185,7 @@ uv run python scripts/backtest.py --no-quality-filter # disable the cataclysmic-
 uv run python scripts/backtest.py --top-n 25         # tighter pick (default 40)
 uv run python scripts/backtest.py --vol-target 0.15  # more aggressive de-risk (default 0.20)
 uv run python scripts/backtest.py --weight pred      # weight basket by predicted_return (default: equal); see "Basket weighting" below
-uv run python scripts/backtest.py --leverage 1.5     # lever up (default 1.0 = cash-only); borrow charged at 5.14% APR — see "Vol-target overlay"
+uv run python scripts/backtest.py --leverage 1.35     # lever up (default 1.0 = cash-only); borrow charged at 5.14% APR — see "Vol-target overlay"
 
 uv run python scripts/today.py                                   # latest-date picks (vol-target sizing + quality filter + top 40)
 uv run python scripts/today.py --diff picks/picks_YYYY-MM-DD.csv # buy/sell list vs that prior file
@@ -767,7 +767,7 @@ cash_bucket_t = 1 - exposure_t                                  # returns 0
 Properties:
 
 - **No leverage by default** — exposure caps at 1.0, only scales down. Opt in
-  with `backtest.py --leverage 1.5`: the cap becomes
+  with `backtest.py --leverage 1.35`: the cap becomes
   `min(leverage, vol_target / spy_vol)`, so you lever up in calm regimes but
   the vol target still de-risks you in stress. Borrowed funds (gross > 1.0)
   accrue margin interest daily at `--margin-rate` (default 5.14% APR = IBKR Pro
