@@ -35,6 +35,10 @@ Leverage (--leverage, default 1.0 = cash-only):
 
 Costs: 5 bps per side on rebalance turnover; margin interest on any borrow.
 Execution: trade at close of rebalance day (assumes MOC orders work).
+    --lag N delays execution N trading days after the signal close: picks and
+    vol-target exposure still come from the signal date's data, but the trade
+    happens at the close N days later — matching a live loop that computes
+    picks after today's close and places orders the next session.
 
 Outputs:
     reports/backtest_equity.png   — equity curves vs SPY
@@ -114,6 +118,7 @@ def run_one_offset(
     quality_filter_on: bool,
     leverage: float,
     margin_rate: float,
+    lag: int = 0,
 ) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
     """Single backtest with rebalances on day `offset`, `offset+hold_days`, ....
 
@@ -124,6 +129,12 @@ def run_one_offset(
     rebalance. `vol_target_on=False` is the raw variant — flat `leverage`×
     exposed. `holdings` is comma-separated tickers (or "" when fully in
     cash) for the auditing CSV.
+
+    `lag` shifts execution `lag` trading days after the signal close. Picks,
+    quality filter, and vol-target exposure are all evaluated on the signal
+    date (that is what a live picks CSV contains); the portfolio switches to
+    the new weights at the close `lag` days later and starts earning the new
+    basket's returns the day after that.
 
     When gross exposure exceeds 1.0 (leverage), the borrowed fraction accrues
     margin interest every held day at `margin_rate` / 252, so the equity curve
@@ -153,20 +164,22 @@ def run_one_offset(
             if borrowed > 0.0:
                 equity *= 1.0 - borrowed * margin_rate / PERIODS_PER_YEAR
 
-        # 2. Rebalance day?
-        is_rebalance = (i >= offset) and ((i - offset) % hold_days == 0)
+        # 2. Rebalance day? (signal fires on offset + k*hold_days; execution
+        # happens `lag` days later, using the signal date's data.)
+        is_rebalance = (i >= offset + lag) and ((i - offset - lag) % hold_days == 0)
         if is_rebalance:
+            signal_date = test_dates[i - lag]
             # Vol-target exposure ∈ [0, leverage]; raw variant pins to leverage.
-            if vol_target_on and date in market.index:
-                spy_vol = market.loc[date, "spy_vol_20d"]
+            if vol_target_on and signal_date in market.index:
+                spy_vol = market.loc[signal_date, "spy_vol_20d"]
                 exposure = strategy.vol_target_exposure(
                     spy_vol, vol_target, max_exposure=leverage
                 )
             else:
                 exposure = leverage
 
-            if exposure > 0 and date in by_date:
-                day = by_date[date]
+            if exposure > 0 and signal_date in by_date:
+                day = by_date[signal_date]
                 if quality_filter_on:
                     day = strategy.apply_quality_filter(day)
                 top = strategy.top_picks(day, top_n)
@@ -209,6 +222,7 @@ def run_shifted_starts(
     quality_filter_on: bool,
     leverage: float,
     margin_rate: float,
+    lag: int = 0,
 ) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series]:
     """Run `hold_days` backtests at different rebalance offsets.
 
@@ -241,7 +255,7 @@ def run_shifted_starts(
             cost_per_side=cost_per_side, vol_target=vol_target,
             weight_mode=weight_mode,
             quality_filter_on=quality_filter_on,
-            leverage=leverage, margin_rate=margin_rate,
+            leverage=leverage, margin_rate=margin_rate, lag=lag,
         )
         curves[offset] = eq
         tim[offset] = float(inm.mean())
@@ -362,6 +376,15 @@ def main() -> None:
     ap.add_argument("--no-overlay", action="store_true",
                     help="Skip the vol-target variant (only run raw long-only + SPY).")
     ap.add_argument(
+        "--lag", type=int, default=0,
+        help=(
+            "Trading days between signal close and execution close (default 0 "
+            "= same-close MOC, the optimistic assumption). Use 1 to model the "
+            "live loop: picks computed after today's close, orders placed the "
+            "next session. Picks/exposure still use the signal date's data."
+        ),
+    )
+    ap.add_argument(
         "--leverage", type=float, default=1.0,
         help=(
             "Gross exposure ceiling (default 1.0 = cash-only, no borrow). "
@@ -420,28 +443,29 @@ def main() -> None:
     gated_avg_exp: pd.Series | None = None
     qf_label = "ON" if quality_filter_on else "OFF"
     lev_label = f", leverage={args.leverage:.2f}x" if args.leverage != 1.0 else ""
+    lag_label = f", lag={args.lag}d" if args.lag != 0 else ""
     if not args.no_overlay:
         print(f"Running long-only WITH vol-target overlay "
               f"(target={args.vol_target:.2f}, {args.hold_days} offsets, "
-              f"weight={args.weight}, quality_filter={qf_label}{lev_label})...")
+              f"weight={args.weight}, quality_filter={qf_label}{lev_label}{lag_label})...")
         gated_curves, gated_tim, gated_holdings, gated_avg_exp = run_shifted_starts(
             test_panel, market,
             vol_target_on=True, top_n=args.top_n, hold_days=args.hold_days,
             cost_per_side=cost_per_side, vol_target=args.vol_target,
             weight_mode=args.weight,
             quality_filter_on=quality_filter_on,
-            leverage=args.leverage, margin_rate=args.margin_rate,
+            leverage=args.leverage, margin_rate=args.margin_rate, lag=args.lag,
         )
 
     print(f"Running long-only RAW / no overlay ({args.hold_days} offsets, "
-          f"weight={args.weight}, quality_filter={qf_label}{lev_label})...")
+          f"weight={args.weight}, quality_filter={qf_label}{lev_label}{lag_label})...")
     raw_curves, _, raw_holdings, _ = run_shifted_starts(
         test_panel, market,
         vol_target_on=False, top_n=args.top_n, hold_days=args.hold_days,
         cost_per_side=cost_per_side, vol_target=args.vol_target,
         weight_mode=args.weight,
         quality_filter_on=quality_filter_on,
-        leverage=args.leverage, margin_rate=args.margin_rate,
+        leverage=args.leverage, margin_rate=args.margin_rate, lag=args.lag,
     )
 
     test_start = pd.Timestamp(test_panel["date"].min())
@@ -485,6 +509,7 @@ def main() -> None:
         "quality_filter": quality_filter_on,
         "leverage": args.leverage,
         "margin_rate": args.margin_rate,
+        "lag": args.lag,
     }
 
     os.makedirs(REPORTS_DIR, exist_ok=True)

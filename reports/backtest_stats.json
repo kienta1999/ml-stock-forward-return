@@ -35,6 +35,7 @@
     "weight_mode": "equal",
     "quality_filter": true,
     "leverage": 1.0,
-    "margin_rate": 0.0514
+    "margin_rate": 0.0514,
+    "lag": 0
   }
 }

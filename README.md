@@ -186,6 +186,7 @@ uv run python scripts/backtest.py --top-n 25         # tighter pick (default 40)
 uv run python scripts/backtest.py --vol-target 0.15  # more aggressive de-risk (default 0.20)
 uv run python scripts/backtest.py --weight pred      # weight basket by predicted_return (default: equal); see "Basket weighting" below
 uv run python scripts/backtest.py --leverage 1.35     # lever up (default 1.0 = cash-only); borrow charged at 5.14% APR — see "Vol-target overlay"
+uv run python scripts/backtest.py --lag 1             # execute at the close 1 trading day AFTER the signal close — models the live loop (picks computed after close, orders placed next session). Measured 2026-07-05 on the same panel: raw CAGR 28.20% → 28.02%, vol-target 25.40% → 25.14%, Sharpe unchanged. 1-day execution lag costs ~0.2 CAGR pt — the MOC assumption is not load-bearing.
 
 uv run python scripts/today.py                                   # latest-date picks (vol-target sizing + quality filter + top 40)
 uv run python scripts/today.py --diff picks/picks_YYYY-MM-DD.csv # buy/sell list vs that prior file
