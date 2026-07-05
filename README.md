@@ -363,13 +363,31 @@ uv run python scripts/execute_picks.py --port 4001 --mode live --max-notional 10
 
 Sizing: `target_$ = weight * NetLiquidation * leverage`. The picks `weight`
 already bakes in the vol-target exposure, so `--leverage 1.0` (default) is
-cash-only and pays no margin interest. Key flags:
+cash-only and pays no margin interest.
+
+**⚠ Leveraged sizing: pass `--vol-target 0.20` to match the backtest.**
+Flat `--leverage 1.35` multiplies the CSV weights by 1.35 no matter the
+regime — in stress, the CSV's baked-in de-risked exposure gets scaled back
+_up_ by 1.35× (e.g. SPY vol 25%: flat gives 1.08× gross, the backtest models
+`min(1.35, 0.20/0.25) = 0.80×`). With `--vol-target 0.20` the script
+renormalizes the CSV weights to gross 1.0 and applies
+`min(leverage, vol_target / spy_vol_20d)` from the **freshest cached SPY
+data** (also fresher than the picks file's signal date; warns if the cache
+is >7 days old — run `data.py` first). This is exactly
+`strategy.vol_target_exposure`, the same function the backtest calls:
+
+```bash
+uv run python scripts/execute_picks.py --port 4001 --leverage 1.35 --vol-target 0.20
+```
+
+Key flags:
 
 | Flag             | What it does                                                                                                                                                                                                                                                                                                                            |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--mode`         | `print` (default, safe) · `whatif` (cost preview) · `live` (places orders)                                                                                                                                                                                                                                                              |
 | `--fractional`   | Fractional-share orders so a small account deploys ~100% instead of stranding cash on pricey names that round to 0 whole shares. ⚠️ **IBKR frequently rejects fractional over the API** (error 10243/10244 — needs the fractional-shares permission enabled, and may be desktop-TWS-only). Verify with `--mode whatif` first. RTH only. |
 | `--leverage`     | Gross exposure multiplier (default 1.0 = cash-only). >1.0 borrows on margin (~5.14% APR).                                                                                                                                                                                                                                               |
+| `--vol-target`   | Backtest-matching overlay for leveraged sizing: gross = `min(leverage, X / spy_vol_20d)` from the freshest cached SPY data, CSV weights renormalized to 1.0 first (0.20 = backtest default). Omit → flat leverage multiple (more exposure in stress than the backtest models).                                                          |
 | `--max-notional` | Hard circuit breaker on total BUY notional; abort if the plan exceeds it.                                                                                                                                                                                                                                                               |
 | `--min-order`    | Skip rebalances below this dollar value (default $100) to avoid churn.                                                                                                                                                                                                                                                                  |
 | `--slippage-bps` | Marketable-limit padding per side (default 30 bps).                                                                                                                                                                                                                                                                                     |

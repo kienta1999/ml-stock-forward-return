@@ -23,6 +23,15 @@ Sizing:
     so with --leverage 1.0 (default) the book is cash-only and pays no margin
     interest. --leverage > 1.0 borrows and is flagged loudly (IBKR Pro ~5.14%).
 
+    --vol-target X makes leveraged sizing match the backtest overlay: gross
+    exposure becomes min(leverage, X / spy_vol_20d) using the freshest cached
+    SPY data, instead of a flat leverage multiple on the CSV weights. Without
+    it, --leverage 1.35 in a stressed regime scales the CSV's baked-in
+    de-risked exposure back UP by 1.35x — more risk than the backtest models
+    (which caps at vol_target/spy_vol, not leverage * vol_target/spy_vol).
+    The CSV weights are renormalized to gross 1.0 first, so the overlay is
+    applied exactly once, from today's vol rather than the signal date's.
+
 Networking (WSL -> Windows Gateway): host auto-detected from the WSL default
 route unless --host is given. --port is REQUIRED, no default (4002 = paper,
 4001 = live) so the live/paper choice is always explicit. See
@@ -46,8 +55,12 @@ import pandas as pd
 
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 _ROOT = os.path.dirname(_HERE)
 PICKS_DIR = os.path.join(_ROOT, "picks")
+
+VOL_STALE_DAYS_WARN = 7
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -72,6 +85,30 @@ def latest_picks_file() -> str:
     if not files:
         sys.exit(f"No picks_*.csv found in {PICKS_DIR}")
     return files[-1]
+
+
+def current_vol_target_exposure(
+    vol_target: float, leverage: float
+) -> tuple[float, float, pd.Timestamp]:
+    """Backtest-matching gross exposure from the freshest cached SPY data.
+
+    Returns (exposure, spy_vol_20d, asof_date) where
+    exposure = min(leverage, vol_target / spy_vol_20d) — the same
+    strategy.vol_target_exposure the backtest applies at each rebalance.
+    Reads the local SPY/VIX parquet cache (no IBKR needed); run
+    scripts/data.py first if the cache is stale.
+    """
+    import strategy
+    from data import load_market
+
+    market_data = load_market()
+    market = strategy.prepare_market(market_data["SPY"], market_data["VIX"])
+    vol = market["spy_vol_20d"].dropna()
+    if vol.empty:
+        sys.exit("No spy_vol_20d in the SPY cache — run scripts/data.py first.")
+    spy_vol = float(vol.iloc[-1])
+    exposure = strategy.vol_target_exposure(spy_vol, vol_target, max_exposure=leverage)
+    return exposure, spy_vol, pd.Timestamp(vol.index[-1])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -234,6 +271,14 @@ def main() -> None:
     ap.add_argument("--leverage", type=float, default=1.0,
                     help="Gross exposure multiplier (default 1.0 = cash-only, "
                          "no margin). >1.0 borrows at IBKR Pro ~5.14%% APR.")
+    ap.add_argument("--vol-target", type=float, default=None,
+                    help="Backtest-matching overlay: gross exposure = "
+                         "min(leverage, VOL_TARGET / spy_vol_20d) from the "
+                         "freshest cached SPY data (0.20 = backtest default). "
+                         "CSV weights are renormalized to gross 1.0 first. "
+                         "Without this flag, --leverage multiplies the CSV "
+                         "weights flat — MORE exposure in stressed regimes "
+                         "than the backtest models.")
     ap.add_argument("--slippage-bps", type=float, default=30.0,
                     help="Marketable-limit padding per side (default 30 bps).")
     ap.add_argument("--fractional", action="store_true",
@@ -257,6 +302,30 @@ def main() -> None:
     if args.leverage != 1.0:
         print(f"⚠  leverage {args.leverage:.2f}x — this BORROWS on margin "
               f"(~5.14% APR). Cash-only is --leverage 1.0.")
+
+    # Sizing: build_plan multiplies CSV weights by `sizing_leverage`;
+    # `gross_target` (× equity) is the intended gross book, used for the
+    # default --max-notional cap.
+    sizing_leverage = args.leverage
+    gross_target = args.leverage
+    if args.vol_target is not None:
+        weight_sum = float(picks["weight"].sum())
+        if weight_sum <= 0:
+            print("Vol-target overlay: picks carry no long weight — nothing to scale.")
+        else:
+            exposure, spy_vol, asof = current_vol_target_exposure(
+                args.vol_target, args.leverage
+            )
+            age_days = (pd.Timestamp.now().normalize() - asof.normalize()).days
+            stale = (f"  ⚠ {age_days}d old — run scripts/data.py first!"
+                     if age_days > VOL_STALE_DAYS_WARN else "")
+            print(f"Vol-target overlay: spy_vol_20d={spy_vol:.1%} "
+                  f"(as of {asof.date()}){stale}")
+            print(f"  gross = min(leverage {args.leverage:.2f}, "
+                  f"{args.vol_target:.2f}/{spy_vol:.3f}) = {exposure:.2f}x  "
+                  f"(CSV weights sum {weight_sum:.3f} renormalized to 1.0 first)")
+            sizing_leverage = exposure / weight_sum
+            gross_target = exposure
 
     host = args.host or resolve_windows_host()
     print(f"Connecting to {host}:{args.port} (clientId={args.client_id}) ...")
@@ -312,7 +381,7 @@ def main() -> None:
                   "account must have fractional trading enabled).")
         plan = build_plan(
             picks[picks["ticker"].isin(contracts)], equity, prices, current_shares,
-            leverage=args.leverage, min_order=args.min_order,
+            leverage=sizing_leverage, min_order=args.min_order,
             fractional=args.fractional,
         )
         print_plan(plan)
@@ -328,7 +397,7 @@ def main() -> None:
 
         # Circuit breaker.
         cap = args.max_notional if args.max_notional is not None \
-            else equity * args.leverage * 1.05
+            else equity * gross_target * 1.05
         if buy_notional > cap:
             sys.exit(f"\n🛑 ABORT: buy notional ${buy_notional:,.0f} exceeds "
                      f"cap ${cap:,.0f}. Raise --max-notional if intended.")
