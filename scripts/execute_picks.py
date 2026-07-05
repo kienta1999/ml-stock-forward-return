@@ -272,6 +272,7 @@ def main() -> None:
                     help="Gross exposure multiplier (default 1.0 = cash-only, "
                          "no margin). >1.0 borrows at IBKR Pro ~5.14%% APR.")
     ap.add_argument("--vol-target", type=float, default=None,
+                    nargs="?", const=0.20,
                     help="Backtest-matching overlay: gross exposure = "
                          "min(leverage, VOL_TARGET / spy_vol_20d) from the "
                          "freshest cached SPY data (0.20 = backtest default). "
@@ -293,6 +294,12 @@ def main() -> None:
                     help="Hard circuit breaker on total BUY notional. Default: "
                          "equity * leverage * 1.05. Abort if the plan exceeds it.")
     args = ap.parse_args()
+
+    if args.vol_target is not None and not 0.0 < args.vol_target <= 1.0:
+        sys.exit(f"--vol-target {args.vol_target} looks wrong — it is an annualized "
+                 f"vol FRACTION (0.20 = 20%). A value > 1 would never bind and "
+                 f"silently disable the overlay. Did you mean "
+                 f"{args.vol_target / 100:.2f}? Bare --vol-target defaults to 0.20.")
 
     picks_path = args.picks or latest_picks_file()
     picks = pd.read_csv(picks_path)
