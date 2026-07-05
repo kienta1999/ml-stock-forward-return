@@ -259,6 +259,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--picks", default=None,
                     help="Picks CSV. Default: latest picks/picks_*.csv.")
+    ap.add_argument("--top-n", type=int, default=None,
+                    help="Trade only the top N picks by predicted_return, "
+                         "weights rescaled to preserve the CSV's gross exposure. "
+                         "Default: every name in the CSV. 40 = backtest canonical; "
+                         "20 backtests better and halves fixed order costs but is "
+                         "UNVERIFIED in the leave-2008-out stress test.")
     ap.add_argument("--host", default=None,
                     help="Gateway host. Default: auto-detect WSL->Windows gateway.")
     ap.add_argument("--port", type=int, required=True,
@@ -304,6 +310,20 @@ def main() -> None:
     picks_path = args.picks or latest_picks_file()
     picks = pd.read_csv(picks_path)
     picks = picks[picks["weight"] > 0]
+    if args.top_n is not None:
+        if args.top_n < 1:
+            sys.exit(f"--top-n {args.top_n} must be >= 1.")
+        if args.top_n < len(picks):
+            gross = float(picks["weight"].sum())
+            sort_col = ("predicted_return"
+                        if "predicted_return" in picks.columns else None)
+            if sort_col:
+                picks = picks.sort_values(sort_col, ascending=False)
+            picks = picks.head(args.top_n).copy()
+            picks["weight"] *= gross / float(picks["weight"].sum())
+            print(f"--top-n {args.top_n}: kept top {args.top_n} by "
+                  f"{sort_col or 'file order'}, weights rescaled to preserve "
+                  f"gross {gross:.3f}")
     print(f"Picks: {picks_path}  ({len(picks)} names, "
           f"weights sum to {picks['weight'].sum():.3f})")
     if args.leverage != 1.0:

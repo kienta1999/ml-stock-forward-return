@@ -394,6 +394,7 @@ Key flags:
 | Flag             | What it does                                                                                                                                                                                                                                                                                                                            |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--mode`         | `print` (default, safe) · `whatif` (cost preview) · `live` (places orders)                                                                                                                                                                                                                                                              |
+| `--top-n`        | Trade only the top N picks by `predicted_return`, weights rescaled to preserve the CSV's gross exposure (composes with `--vol-target`). **40 = backtest canonical and 2008-stress-tested; 20 backtests better (raw CAGR 34.5% vs 28.2%, Sharpe within noise) and halves fixed order costs — but is UNVERIFIED in the leave-2008-out stress test and holds ~70% tech vs 65% at 40.** Both are reasonable; verify 20 in the 2008 walk-forward before switching real money to it. |
 | `--fractional`   | Fractional-share orders so a small account deploys ~100% instead of stranding cash on pricey names that round to 0 whole shares. ⚠️ **IBKR frequently rejects fractional over the API** (error 10243/10244 — needs the fractional-shares permission enabled, and may be desktop-TWS-only). Verify with `--mode whatif` first. RTH only. |
 | `--leverage`     | Gross exposure multiplier (default 1.0 = cash-only). >1.0 borrows on margin (~5.14% APR).                                                                                                                                                                                                                                               |
 | `--vol-target`   | Backtest-matching overlay for leveraged sizing: gross = `min(leverage, X / spy_vol_20d)` from the freshest cached SPY data, CSV weights renormalized to 1.0 first. Bare flag = 0.20 (the backtest default); values ≤ 0 or > 1 rejected (percent typo guard). Omit → flat leverage multiple (more exposure in stress than the backtest models). |
@@ -408,7 +409,8 @@ market orders). Live mode enforces the `--max-notional` cap and, on a `U…`
 
 **Small-account caveat:** IBKR charges ~$1 flat per order. On a ~$10k / 40-name
 book that's ~$40 to enter (~40 bps), ~80 bps round-trip — vs the backtest's
-5 bps/side assumption. Concentrate (`today.py --top-n 15`) or size up to
+5 bps/side assumption. Concentrate (`execute_picks.py --top-n 20`, or
+`today.py --top-n 15` at pick time) or size up to
 dilute the fixed cost.
 
 ### `data.py` CLI flags
