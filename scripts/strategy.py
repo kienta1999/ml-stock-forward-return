@@ -101,11 +101,14 @@ def prepare_market(spy_df: pd.DataFrame, vix_df: pd.DataFrame) -> pd.DataFrame:
     the legacy binary regime gate (`SPY > SMA200 AND VIX < 25`). Uncomment
     + restore the `regime_long_row` call site to re-enable that gate.
     """
-    market = pd.DataFrame({
-        "spy_close": spy_df["Close"],
-        "vix_close": vix_df["Close"],
-    })
+    # Build on the SPY (equity) trading calendar and align VIX onto it. VIX/CBOE
+    # carries rows on equity holidays (e.g. Memorial Day, Juneteenth) that SPY
+    # lacks; a naive union would NaN out spy_close on those dates, which then
+    # poisons pct_change and the rolling std — freezing spy_vol_20d for ~20 rows
+    # after every holiday. Reindexing VIX onto SPY's index keeps spy_close dense.
+    market = pd.DataFrame({"spy_close": spy_df["Close"]})
     market.index = pd.to_datetime(market.index)
+    market["vix_close"] = vix_df["Close"].reindex(market.index)
     # Legacy VIX/SMA200 regime gate (retired 2026-05-11). Uncomment to revive.
     # market["spy_sma200"] = market["spy_close"].rolling(200).mean()
     market["spy_ret_1d"] = market["spy_close"].pct_change()
