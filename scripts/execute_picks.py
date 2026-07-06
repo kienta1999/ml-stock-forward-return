@@ -286,8 +286,11 @@ def main() -> None:
                          "Without this flag, --leverage multiplies the CSV "
                          "weights flat — MORE exposure in stressed regimes "
                          "than the backtest models.")
-    ap.add_argument("--slippage-bps", type=float, default=30.0,
-                    help="Marketable-limit padding per side (default 30 bps).")
+    ap.add_argument("--slippage-bps", type=float, default=50.0,
+                    help="Marketable-limit padding per side (default 50 bps). "
+                         "Sizing prices are 15-min delayed, so a thin buffer "
+                         "misses fills when the market drifts (2026-07-06: 3/20 "
+                         "orders missed at 30 bps).")
     ap.add_argument("--fractional", action="store_true",
                     help="Fractional-share orders so a small account deploys ~100%% "
                          "instead of stranding cash on pricey names. NOTE: IBKR often "
