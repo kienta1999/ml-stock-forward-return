@@ -406,6 +406,11 @@ Key flags:
 set explicitly (dodges the Gateway order-preset that trips error 10349 on bare
 market orders). Live mode enforces the `--max-notional` cap and, on a `U…`
 (live) account, requires you to type the exact account number to confirm.
+Before rebalancing, live mode **cancels all working orders** (aborting if any
+refuse to cancel) so stale limits from a previous run can't fill alongside
+fresh duplicates — the plan reconciles against positions only, so an unseen
+working order would otherwise double-buy. `print`/`whatif` are read-only and
+just warn when working orders exist.
 
 **Small-account caveat:** IBKR charges ~$1 flat per order. On a ~$10k / 40-name
 book that's ~$40 to enter (~40 bps), ~80 bps round-trip — vs the backtest's

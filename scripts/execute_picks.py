@@ -13,7 +13,10 @@ Three modes, safest first — always dry-run before you trade:
     --mode whatif  sends each order to IBKR flagged what-if. IBKR returns
                    commission + margin impact; nothing is placed or queued.
                    The honest total-cost preview.
-    --mode live    actually places orders. Gated behind: a hard --max-notional
+    --mode live    actually places orders. First cancels ALL working orders on
+                   the connection (stale limits from a previous run would
+                   otherwise fill alongside fresh duplicates), then rebalances
+                   from the clean book. Gated behind: a hard --max-notional
                    circuit breaker, a LIVE-account warning, and (on a U-prefix
                    account) a typed confirmation of the exact account number.
 
@@ -207,6 +210,40 @@ def build_plan(
     return pd.DataFrame(rows)
 
 
+def cancel_pending_orders(ib) -> None:
+    """Cancel every working order visible on the connection, wait for confirms.
+
+    Run in live mode BEFORE positions are read, so the rebalance plan starts
+    from a clean book: a stale limit from a previous run can neither fill
+    mid-run (double-buying a name the plan already counts) nor sit alongside
+    a fresh duplicate order. Uses reqAllOpenOrders so orders from a previous
+    session under the same clientId are picked up too.
+    """
+    ib.reqAllOpenOrders()
+    ib.sleep(1.5)
+    working = [t for t in ib.openTrades() if t.isActive()]
+    if not working:
+        print("Pending orders: none — book is clean.")
+        return
+    print(f"Pending orders: cancelling {len(working)} working order(s) first:")
+    for t in working:
+        o = t.order
+        print(f"  {t.contract.symbol:<6} {o.action} {o.totalQuantity:.4g} "
+              f"@ {o.lmtPrice} ({t.orderStatus.status})")
+        ib.cancelOrder(o)
+    # Wait for cancel confirms (up to ~10s) so positions reflect final fills.
+    for _ in range(20):
+        ib.sleep(0.5)
+        if not any(t.isActive() for t in ib.openTrades()):
+            break
+    stuck = [t for t in ib.openTrades() if t.isActive()]
+    if stuck:
+        names = ", ".join(t.contract.symbol for t in stuck)
+        sys.exit(f"🛑 ABORT: could not cancel working order(s): {names}. "
+                 f"Cancel them in Gateway/TWS, then re-run.")
+    print("  all cancelled.")
+
+
 def make_order(action_buy: bool, qty: float, price: float, slippage_bps: float,
                account: str):
     """Marketable LIMIT order with fields set explicitly.
@@ -378,6 +415,21 @@ def main() -> None:
                         if v.tag == "NetLiquidation" and v.currency == "USD"][0].value)
         print(f"Account: {acct}  ({'LIVE — REAL MONEY' if is_live else 'paper'})  "
               f"NetLiquidation=${equity:,.2f}")
+
+        # Live mode starts from a clean book: cancel working orders BEFORE
+        # reading positions, so a stale limit can't fill mid-run or duplicate
+        # a fresh order. print/whatif are read-only — warn instead.
+        if args.mode == "live":
+            cancel_pending_orders(ib)
+        else:
+            ib.reqAllOpenOrders()
+            ib.sleep(1.5)
+            pending = [t for t in ib.openTrades() if t.isActive()]
+            if pending:
+                names = ", ".join(t.contract.symbol for t in pending)
+                print(f"⚠  {len(pending)} working order(s) pending ({names}) — "
+                      f"the plan below ignores them. --mode live cancels them "
+                      f"before rebalancing.")
 
         # Qualify contracts; drop any that don't resolve (delisted/renamed).
         contracts = {}
