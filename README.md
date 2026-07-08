@@ -1721,6 +1721,46 @@ Where `WC = current_assets − current_liabilities` (already pulled as `mrq_asse
 
 **Hypothesis to validate after retraining.** `op_income_growth_yoy` was dead in 5/5 stability seeds and `sales_growth_yoy` survives — earnings-form growth doesn't pay here. But profitability and asset-growth capture different axes (operational efficiency, expansion-as-overinvestment) — they should land non-zero. Accruals is the riskiest of the three (requires depreciation tag coverage, which is patchier in XBRL than revenue/COGS).
 
+### 12. Model-architecture experiments — same panel, new objectives (free, ~½–1 day each)
+
+Every signal source so far has been a new *feature*. These are new *models /
+objectives* on the existing 47-feature panel — cheap to try because the data
+layer doesn't change. In rough order of expected fit:
+
+1. **Learning-to-rank objective.** The label, the tuning metric, and the
+   strategy are all ranking constructs, but training is RMSE regression.
+   XGBoost ships `rank:pairwise` / `rank:ndcg` — set the date as the group
+   key (`DMatrix.set_group` with per-date row counts; splits are already
+   chronological so groups never straddle train/val). LambdaMART directly
+   optimizes "get the top of the list right," which is what top-40
+   selection needs and what decile-spread regression only approximates.
+   Keep the top-40 mean-return eval metric for early stopping so the
+   objective change is the only variable.
+2. **Classification reframing.** Predict `P(stock in top decile of forward
+   21d return)` as binary logistic instead of regressing the demeaned
+   return. Robust to the fat-tailed label noise that forces the ±0.5 clip,
+   and the predicted probability is a natural position-sizing weight.
+   Label build is a per-date `groupby.rank(pct=True) >= 0.9` on the
+   existing forward return — no new data.
+3. **Multi-horizon blend.** Add 5d and 63d forward labels in `labels.py`,
+   train three boosters, blend their per-date ranks (start with equal
+   weights). Short horizons capture reversal, long capture trend; the
+   blend usually beats any single horizon.
+4. **Meta-labeling** (López de Prado, *Advances in Financial ML* ch. 3).
+   A second small model takes the primary model's prediction + regime
+   features and predicts "will this pick beat SPY over the hold?" — used
+   for *sizing*, not selection. The principled version of what the
+   cataclysmic quality filter does by hand. Needs care to train it on
+   out-of-fold primary predictions to avoid leakage.
+5. **Cross-model ensemble.** XGBoost + LightGBM + a ridge regression on
+   the rank features, averaged per-date ranks. Different inductive biases
+   diversify better than different RNG seeds — but do §5 (5-seed ensemble)
+   first since it's already scoped and the tooling exists.
+
+Skip neural nets (MLP / TabNet) for now — on a ~1M-row tabular panel with
+47 features, gradient-boosted trees almost always win, and the time is
+better spent on the ranking objective.
+
 ---
 
 ## TODOs
@@ -1774,6 +1814,12 @@ Where `WC = current_assets − current_liabilities` (already pulled as `mrq_asse
 - [ ] re-run null test on the clean-architecture model (current null-test table is stale)
 - [ ] data: swap yfinance → Sharadar (or equivalent) for delisted-ticker coverage — do before going live
 - [ ] follow-up stability-selection prune now that 4 new features have landed — `excess_ret_5d`, `atr_pct`, `earnings_yield`, `roa_rank` were dead in this single run, but a 5-seed sweep is needed before pruning
+- [ ] model: learning-to-rank objective (`rank:pairwise` / `rank:ndcg`, date as group key) — direct match to top-40 selection; keep the top-40 mean-return eval metric so the objective is the only variable. See [§12](#12-model-architecture-experiments--same-panel-new-objectives-free-1-day-each).
+- [ ] model: classification reframing — binary logistic on `P(top decile of forward 21d return)`; robust to fat-tailed labels, probability doubles as a sizing weight. See [§12](#12-model-architecture-experiments--same-panel-new-objectives-free-1-day-each).
+- [ ] labels: multi-horizon blend — add 5d + 63d forward labels, train 3 boosters, blend per-date ranks. See [§12](#12-model-architecture-experiments--same-panel-new-objectives-free-1-day-each).
+- [ ] model: meta-labeling — second model predicts P(pick beats SPY) for sizing, trained on out-of-fold primary predictions. See [§12](#12-model-architecture-experiments--same-panel-new-objectives-free-1-day-each).
+- [ ] system: cross-model ensemble (XGBoost + LightGBM + ridge-on-ranks, per-date rank average) — after the 5-seed ensemble (§5) lands. See [§12](#12-model-architecture-experiments--same-panel-new-objectives-free-1-day-each).
+- [ ] cross-project: point-in-time backtest of the `single-stock-pick-from-sp500` deterministic funnel against this repo's panel (membership history + OHLCV + XBRL fundamentals) — validates that doctrine's quality gates historically; see that repo's README roadmap.
 - [ ] 🔴 **train.py: replace optuna objective (val decile spread) with a top-40-aligned metric** — empirical anti-correlation observed during the 8-K work (May 2026): a 350-trial sweep maximised val decile spread to 0.0183 but backtested at +18.81% raw CAGR, while `--quick` with saved DEFAULT_PARAMS (val decile spread 0.0161) backtested at +21.60%. Decile spread averages ranking across deciles 1 & 10 (~50 names each) but the strategy holds only the top 40 — the very tip of decile 1. Replace `_compute_decile_spread()` with cumulative log return (or Sharpe) of an equal-weighted top-40 portfolio over val. Until this lands, **do not run `train.py --trials N`** — the saved DEFAULT_PARAMS are the current best model. Also lower `reg_lambda` floor from 0.001 (already done) — no other range changes pending.
 
 Paste this to claude to ask
@@ -1838,3 +1884,4 @@ for history but it no longer blocks.
 
 claude --resume eabad73f-1806-46e5-99e1-4f4c8817d4ba
 Live ibkr place trade: claude --resume 86203dd8-11fa-43ed-a889-a7213c2e3af3
+July trade placed: claude --resume 944406b7-7f36-440e-884d-723e320df5fa
