@@ -305,6 +305,39 @@ Output lands in `picks/picks_<latest_date>.csv` (one file per run;
 gitignored to keep daily noise out of git). Cash days produce an empty
 picks file. The script warns if the panel is more than 7 days old.
 
+### Rebalance cadence decision (2026-07-08): QUARTERLY @ 1.35x leverage
+
+**Decision: rebalance every ~3 months (63 trading days), `--leverage 1.35
+--vol-target 0.2`, revisit the account quarterly.** Cadence sweep on the
+2021→2026-06 panel (vol-target variant, margin @ 5.14% APR modeled):
+
+| Hold @ 1.35x        | CAGR        | Sharpe   | MaxDD  | offset-luck CAGR range |
+| ------------------- | ----------- | -------- | ------ | ---------------------- |
+| monthly (21d)       | +30.58%     | 1.08     | −28.6% | +24.6% → +34.9%        |
+| **quarterly (63d)** | **+30.58%** | **1.11** | −29.1% | +22.3% → +37.3%        |
+| annual (252d)       | +25.01%     | 0.96     | −31.7% | +15.1% → +36.4%        |
+
+(Unlevered vol-target CAGR: monthly 25.5% / quarterly 25.3% / 6-mo 23.8%
+/ annual 21.4% — the 21d signal decays slowly out to ~1 quarter, then
+meaningfully.) Monthly vs quarterly gross is a dead heat, so the
+unmodeled costs decide it: fixed IBKR fees (~$40/rebalance → $480/yr
+monthly vs $160/yr quarterly — a multi-point drag on a small account)
+and slower short-term-gain churn. Annual's long-term-tax edge (~+1pt
+after-tax, unlevered) is eaten at 1.35x by the wider gross gap, worse
+Sharpe, worse MaxDD, and huge single-rebalance date luck. A **4-sleeve
+structure** (each sleeve held >1yr, one sleeve rebalanced per quarter →
+every sale long-term, quarterly fees) is the taxable-account upgrade
+path if the account grows.
+
+⚠️ **Standing caveat:** the vol-target overlay is only *evaluated at
+rebalance*. Quarterly cadence = up to ~3 months fully levered at 1.35x
+before the overlay reacts to a vol spike (the MaxDD −29% above is from
+a calm window with no such spike; the leave-2008-out stress test was
+−64.6% *unlevered*). Mitigation not yet built (see TODO): a daily
+de-risk check — recompute `min(1.35, 0.20 / spy_vol_20d)` from fresh
+SPY data and sell down off-cycle if it falls materially below current
+exposure. Until then, the quarterly revisit is the only checkpoint.
+
 ### Live execution (IBKR)
 
 `scripts/execute_picks.py` turns a `picks/*.csv` into real orders on
@@ -1835,6 +1868,7 @@ better spent on the ranking objective.
 - [ ] re-run null test on the clean-architecture model (current null-test table is stale)
 - [ ] data: swap yfinance → Sharadar (or equivalent) for delisted-ticker coverage — do before going live
 - [ ] follow-up stability-selection prune now that 4 new features have landed — `excess_ret_5d`, `atr_pct`, `earnings_yield`, `roa_rank` were dead in this single run, but a 5-seed sweep is needed before pruning
+- [ ] 🔴 **daily de-risk check** — small script (or `today.py` mode) that recomputes `min(1.35, 0.20 / spy_vol_20d)` from the freshest cached SPY data and prints "OK — hold" or "⚠ DE-RISK: formula says X%, book is at Y% — sell down today". The quarterly-@-1.35x cadence (see [Rebalance cadence decision](#rebalance-cadence-decision-2026-07-08-quarterly--135x-leverage)) leaves the vol overlay blind for up to ~3 months between rebalances; this check restores daily-granularity crash protection for free (trades only when it fires). Wire into `run_all.py` after diagnostics.
 - [ ] model: learning-to-rank objective (`rank:pairwise` / `rank:ndcg`, date as group key) — direct match to top-40 selection; keep the top-40 mean-return eval metric so the objective is the only variable. See [§12](#12-model-architecture-experiments--same-panel-new-objectives-free-1-day-each).
 - [ ] model: classification reframing — binary logistic on `P(top decile of forward 21d return)`; robust to fat-tailed labels, probability doubles as a sizing weight. See [§12](#12-model-architecture-experiments--same-panel-new-objectives-free-1-day-each).
 - [ ] labels: multi-horizon blend — add 5d + 63d forward labels, train 3 boosters, blend per-date ranks. See [§12](#12-model-architecture-experiments--same-panel-new-objectives-free-1-day-each).
