@@ -1,0 +1,9 @@
+{
+  "generated": "2026-07-08 00:01:00.471655",
+  "top_n": 40,
+  "live": {
+    "n_windows": 11,
+    "n_matured": 6,
+    "avg_active_ret_matured": 0.04425504156082913
+  }
+}

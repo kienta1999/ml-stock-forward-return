@@ -77,7 +77,7 @@ def _pre_today_picks_file() -> str | None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _run(label: str, cmd: list[str], dry_run: bool) -> int:
+def _run(label: str, cmd: list[str], dry_run: bool, allow_fail: bool = False) -> int:
     print(f"\n{'═' * 70}")
     print(f"  {label}")
     print(f"  $ {' '.join(cmd)}")
@@ -90,6 +90,9 @@ def _run(label: str, cmd: list[str], dry_run: bool) -> int:
     elapsed = time.time() - t0
     status = "OK" if result.returncode == 0 else f"FAILED (exit {result.returncode})"
     print(f"  → {status} in {elapsed:.1f}s")
+    if allow_fail and result.returncode != 0:
+        print(f"  (non-fatal step — continuing despite failure)")
+        return 0
     return result.returncode
 
 
@@ -172,10 +175,22 @@ def main() -> int:
                 today_cmd += ["--diff", os.path.relpath(prev, _ROOT)]
         steps.append(("Generate today's picks", today_cmd))
 
-    return _execute(steps, args.dry_run)
+    # Diagnostics run last and are non-fatal: a plotting/scipy hiccup must
+    # never make the daily pipeline (and its cron exit code) look broken —
+    # the picks are already written by this point.
+    non_fatal = {"Strategy diagnostics"}
+    if not args.no_today:
+        steps.append(("Strategy diagnostics", py + ["scripts/diagnostics.py"]))
+
+    return _execute(steps, args.dry_run, non_fatal)
 
 
-def _execute(steps: list[tuple[str, list[str]]], dry_run: bool) -> int:
+def _execute(
+    steps: list[tuple[str, list[str]]],
+    dry_run: bool,
+    non_fatal: set[str] | None = None,
+) -> int:
+    non_fatal = non_fatal or set()
     print(f"\nrun_all.py — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{len(steps)} step(s) planned:")
     for label, cmd in steps:
@@ -183,7 +198,7 @@ def _execute(steps: list[tuple[str, list[str]]], dry_run: bool) -> int:
 
     overall_t0 = time.time()
     for label, cmd in steps:
-        code = _run(label, cmd, dry_run)
+        code = _run(label, cmd, dry_run, allow_fail=label in non_fatal)
         if code != 0:
             print(f"\n!!! Pipeline failed at: {label}")
             return code

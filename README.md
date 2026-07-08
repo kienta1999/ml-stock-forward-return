@@ -188,6 +188,9 @@ uv run python scripts/backtest.py --weight pred      # weight basket by predicte
 uv run python scripts/backtest.py --leverage 1.35     # lever up (default 1.0 = cash-only); borrow charged at 5.14% APR — see "Vol-target overlay"
 uv run python scripts/backtest.py --lag 1             # execute at the close 1 trading day AFTER the signal close — models the live loop (picks computed after close, orders placed next session). Measured 2026-07-05 on the same panel: raw CAGR 28.20% → 28.02%, vol-target 25.40% → 25.14%, Sharpe unchanged. 1-day execution lag costs ~0.2 CAGR pt — the MOC assumption is not load-bearing.
 
+uv run python scripts/diagnostics.py                 # IC stability, underwater, concentration, attribution, hit rate, live-picks scorecard
+uv run python scripts/diagnostics.py --live-only     # just mark picks/*.csv to market vs SPY (fast)
+
 uv run python scripts/today.py                                   # latest-date picks (vol-target sizing + quality filter + top 40)
 uv run python scripts/today.py --diff picks/picks_YYYY-MM-DD.csv # buy/sell list vs that prior file
 uv run python scripts/today.py --no-overlay                      # ignore vol-target (always 100% exposure)
@@ -1633,21 +1636,39 @@ the 21 shifted-start offsets, but as one continuous portfolio rather than
 21 independent ones. Smooths daily turnover, eliminates rebalance-date
 fragility, becomes the realistic live-trading mechanic.
 
-### 8. Diagnostics module (per-month IC stability, drawdown, attribution)
+### 8. Diagnostics module — ✅ SHIPPED 2026-07-08 (`scripts/diagnostics.py`)
 
-backtest.py reports summary stats; the interesting questions need slicing.
+Six read-only sections (no IBKR connection): per-month IC stability,
+underwater plot from the backtest artifacts, picks-concentration audit,
+per-stock attribution, per-rebalance hit rate vs SPY, and a live-picks
+scorecard that marks every `picks/picks_*.csv` to market from cached
+prices (basket incl. cash drag vs SPY over the same 21-trading-day
+window, matured vs open). Sections 1/3-5 measure the *model* on
+equal-weight offset-0 baskets; section 6 measures what the live pick
+files actually said to hold. Runs automatically as the final, non-fatal
+step of `run_all.py`; `--live-only` is the fast daily path. Outputs:
+`reports/diagnostics_{ic_monthly,attribution,live_scorecard}.csv`,
+`diagnostics_underwater.png`, `diagnostics_summary.json`.
 
-**What to build** (probably `scripts/diagnostics.py`):
+**First run (2026-07-08, test 2021→2026-06) — honest reads:**
 
-- Per-month IC time series + t-stat + % of months positive — is the alpha
-  stable, or driven by 2 outlier months?
-- Underwater plot — when did drawdowns happen, how long did they last,
-  recovery time?
-- Picks-concentration audit — ticker frequency, sector breakdown,
-  consecutive-rebalance overlap distribution.
-- Per-stock attribution — top-10 contributors and detractors to total return.
-- Hit rate — of each rebalance's 50 picks, how many beat SPY over the next
-  21 days?
+- **The IC-level alpha is thin and lumpy**: monthly IC mean +0.018,
+  t-stat **1.12** (not significant), only 55% of months positive, and
+  excluding the top-3 months drops the mean to +0.005. The best and
+  worst months are adjacent (2025-04 IC +0.31, 2025-03 IC −0.28) — the
+  tariff-shock whipsaw. The strategy's edge shows up better at the
+  basket level than the full-cross-section IC level: avg 21d basket
+  return +2.41% vs SPY +1.27%, basket beats SPY on 54% of rebalances
+  with hit rate 52% — a small, persistent tilt plus fat right-tail
+  months, not a steady high-IC signal.
+- **Concentration is real but bounded**: avg IT sector weight 30%
+  (peak 57.5% in one basket), 54% consecutive-rebalance overlap
+  (~46% turnover/month), 295 unique names over 65 rebalances. Top-10
+  contributors = 28% of summed contribution (INTC, STX, NVDA, WDC…).
+- **Live picks (since 2026-03)**: 6 matured windows, avg active return
+  **+4.43%**, beat SPY in 4/6 — but all 5 currently-open windows are
+  trailing SPY (−0.75% to −4.28% active). Watch whether that's noise
+  or decay.
 
 ### 9. FRED macro broadcast features (free) — **SHIPPED 2026-05-11**
 
@@ -1774,7 +1795,7 @@ better spent on the ranking objective.
 - [x] backtest.py — monthly rebalance + 21 shifted-start offsets, regime gate, null test
 - [x] today.py — live picks for the latest feature date, with `--diff` for daily BUY/SELL tickets
 - [ ] upgrade backtest to overlapping 21-day sleeves (smooths the offset CAGR range)
-- [ ] diagnostics: per-month IC stability, underwater plot, picks-concentration audit, per-stock attribution
+- [x] diagnostics: per-month IC stability, underwater plot, picks-concentration audit, per-stock attribution, hit rate, live-picks scorecard — shipped 2026-07-08 as `scripts/diagnostics.py`, wired as the final non-fatal step of `run_all.py`. First-run findings in [§8](#8-diagnostics-module--shipped-2026-07-08-scriptsdiagnosticspy): monthly IC t-stat only 1.12 (top-3 months carry most of the IC), but basket-level edge is steadier (+2.41% vs SPY +1.27% avg per rebalance); live picks 6 matured windows avg +4.43% active, open windows all trailing.
 - [x] run_all.py orchestrator — daily and retrain modes, auto --diff for today.py
 - [x] add label clip ±0.5 to keep dead-ticker −100% labels from dominating MSE
 - [x] re-tune with `max_depth ∈ [3, 6]` and re-run backtest (200 trials; raw +13.3% → +17.3%, val decile spread +0.0213 → +0.0297; optuna picked depth=3 + `colsample_bytree=0.629` as the actual lever)
