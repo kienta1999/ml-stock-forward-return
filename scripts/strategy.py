@@ -56,6 +56,22 @@ VOL_LOOKBACK = 20
 # leverage is not free, and on a small account the borrow drag is material.
 DEFAULT_MARGIN_RATE = 0.0514
 
+# Annual stock-borrow fee charged on the short leg's gross exposure in
+# --mode top-bottom. 0.50% is a conservative general-collateral rate for
+# S&P 500 large caps (IBKR easy-to-borrow is often ~0.25%); genuinely
+# crowded shorts can run 5-50% — the backtest does NOT model per-name
+# specialness, so treat hard-to-borrow names as an unmodeled cost.
+DEFAULT_BORROW_RATE = 0.005
+
+# Portfolio construction modes shared by backtest.py and today.py.
+#   long-only  — long the top-N (the live strategy).
+#   top-bottom — long top-N AND short bottom-N, equal dollar both legs
+#                (market-neutral; shorts come from the UNFILTERED pool
+#                because the quality filter's cataclysmic names are
+#                exactly the best short candidates).
+PORTFOLIO_MODES = ("long-only", "top-bottom")
+DEFAULT_PORTFOLIO_MODE = "long-only"
+
 # Live-account gross-exposure cap — the leverage leg of the 2026-07-08
 # rebalance-cadence decision (quarterly @ 1.35x, vol-target 0.20).
 # today.py's daily de-risk check uses it as the formula ceiling and as
@@ -200,6 +216,16 @@ def vol_target_exposure(
 def top_picks(day_panel: pd.DataFrame, top_n: int = TOP_N) -> pd.DataFrame:
     """Top-N rows by predicted_return on a single date's slice."""
     return day_panel.nlargest(top_n, "predicted_return")
+
+
+def bottom_picks(day_panel: pd.DataFrame, n: int = TOP_N) -> pd.DataFrame:
+    """Bottom-N rows by predicted_return — the short leg of --mode top-bottom.
+
+    Callers pass the UNFILTERED day slice: the quality filter exists to keep
+    cataclysmic names out of the long book, and those are precisely the names
+    the short leg wants.
+    """
+    return day_panel.nsmallest(n, "predicted_return")
 
 
 def compute_weights(

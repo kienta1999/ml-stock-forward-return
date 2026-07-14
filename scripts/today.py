@@ -36,6 +36,8 @@ CLI:
     uv run python scripts/today.py --diff picks/picks_2026-04-28.csv
     uv run python scripts/today.py --book-exposure 1.2 # override live_book.json
     uv run python scripts/today.py --no-derisk         # skip the de-risk check
+    uv run python scripts/today.py --mode top-bottom   # market-neutral L/S picks
+                                                       # -> picks/top_bottom/ (paper only)
 
 Outputs:
     stdout: SPY 20d vol + recommended exposure + de-risk check + top-N picks
@@ -185,6 +187,20 @@ def _print_diff(picks_df: pd.DataFrame, prev: pd.DataFrame, prev_label: str) -> 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--top-n", type=int, default=strategy.TOP_N)
+    ap.add_argument(
+        "--mode",
+        choices=strategy.PORTFOLIO_MODES,
+        default=strategy.DEFAULT_PORTFOLIO_MODE,
+        help=(
+            "'long-only' (default) = the live strategy. 'top-bottom' = "
+            "market-neutral: long top-N (quality-filtered) AND short bottom-N "
+            "(unfiltered, equal weight, negative CSV weights) at equal "
+            "dollars. Writes to picks/top_bottom/ so the live long-only "
+            "execution flow can never ingest a short book by accident. "
+            "NOTE: execute_picks.py does not support short weights yet — "
+            "top-bottom is backtest/paper only."
+        ),
+    )
     ap.add_argument(
         "--vol-target",
         type=float,
@@ -343,8 +359,31 @@ def main() -> None:
             )
         _print_picks(picks_df, latest_date, args.top_n)
 
-    os.makedirs(PICKS_DIR, exist_ok=True)
-    out_path = os.path.join(PICKS_DIR, f"picks_{today_str}.csv")
+        if args.mode == "top-bottom":
+            # Short leg: bottom-N from the UNFILTERED scored slice — the
+            # quality filter shields the long book only; its cataclysmic
+            # rejects are exactly the names worth shorting. Equal weight
+            # (no 'pred' analogue for shorts), negative in the CSV.
+            bottom = strategy.bottom_picks(today, args.top_n)[
+                ["ticker", "predicted_return"]
+            ].copy().reset_index(drop=True)
+            bottom["weight"] = -exposure / len(bottom)
+            print(f"\n=== SHORT {len(bottom)} PICKS ({latest_date.date()}) — "
+                  f"bottom of the ranking, unfiltered ===")
+            for i, row in bottom.iterrows():
+                print(f"  {i + 1:>2}. {row['ticker']:<8}  "
+                      f"pred={row['predicted_return']:+.4f}  "
+                      f"weight={row['weight']:.4f}")
+            print(f"\n  Gross {2 * exposure:.2f}x (long {exposure:.2f} / short "
+                  f"{exposure:.2f}), net ≈ 0.")
+            print("  ⚠ top-bottom is backtest/paper only — execute_picks.py "
+                  "does not support short weights yet.")
+            picks_df = pd.concat([top, bottom], ignore_index=True)
+
+    out_dir = PICKS_DIR if args.mode == "long-only" \
+        else os.path.join(PICKS_DIR, "top_bottom")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"picks_{today_str}.csv")
     picks_df.to_csv(out_path, index=False)
     print(f"\n  -> picks saved to {out_path}")
 

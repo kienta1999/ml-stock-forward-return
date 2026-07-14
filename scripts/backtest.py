@@ -45,11 +45,21 @@ Outputs:
     reports/backtest_stats.json   — CAGR / Sharpe / Max DD / avg exposure
     reports/backtest_equity.csv   — daily NAV per variant (mean across offsets)
 
+Modes (--mode, default long-only):
+    long-only   — the live strategy: long the top-N.
+    top-bottom  — market-neutral L/S: long top-N (quality-filtered) AND short
+                  bottom-N (unfiltered, equal weight) at equal dollars. Gross
+                  2×exposure, net ≈ 0. Short leg accrues --borrow-rate; margin
+                  interest only on gross long > 1.0 (Reg T: short proceeds are
+                  collateral, not spendable cash). Outputs are suffixed
+                  _top_bottom so canonical long-only reports survive.
+
 CLI:
     uv run python scripts/backtest.py
     uv run python scripts/backtest.py --no-overlay        # vol-target variant off
     uv run python scripts/backtest.py --top-n 25          # tighter pick
     uv run python scripts/backtest.py --vol-target 0.15   # more aggressive de-risk
+    uv run python scripts/backtest.py --mode top-bottom   # market-neutral L/S
 """
 
 import argparse
@@ -119,6 +129,8 @@ def run_one_offset(
     leverage: float,
     margin_rate: float,
     lag: int = 0,
+    mode: str = strategy.DEFAULT_PORTFOLIO_MODE,
+    borrow_rate: float = strategy.DEFAULT_BORROW_RATE,
 ) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
     """Single backtest with rebalances on day `offset`, `offset+hold_days`, ....
 
@@ -128,7 +140,15 @@ def run_one_offset(
     behavior): exposure = min(leverage, vol_target / spy_vol_20d) at each
     rebalance. `vol_target_on=False` is the raw variant — flat `leverage`×
     exposed. `holdings` is comma-separated tickers (or "" when fully in
-    cash) for the auditing CSV.
+    cash) for the auditing CSV; shorts are prefixed "-".
+
+    `mode="top-bottom"` adds a short leg: bottom-N by predicted_return at
+    -exposure/N each (equal weight; the long leg still honors weight_mode),
+    from the UNFILTERED pool — the quality filter only shields the long
+    book. Gross becomes 2×exposure (net ≈ 0). The short leg accrues
+    `borrow_rate`/252 on its gross every held day; margin interest is
+    charged only on gross LONG above 1.0 (short proceeds are collateral,
+    not spendable cash, matching Reg T).
 
     `lag` shifts execution `lag` trading days after the signal close. Picks,
     quality filter, and vol-target exposure are all evaluated on the signal
@@ -156,13 +176,18 @@ def run_one_offset(
             pf_ret = sum(w * ret_map.get(t, 0.0) for t, w in weights.items())
             equity *= 1.0 + pf_ret
 
-        # 1b. Charge margin interest on any borrowed fraction (gross > 1.0).
-        # Weights are fixed between rebalances, so their sum == the gross
-        # exposure set at the last rebalance. Accrues every held day.
+        # 1b. Financing, accrued every held day. Margin interest on gross
+        # LONG above 1.0 (short-sale proceeds are held as collateral under
+        # Reg T — they don't fund the longs); borrow fee on the short leg's
+        # gross. Weights are fixed between rebalances.
         if weights:
-            borrowed = sum(weights.values()) - 1.0
+            gross_long = sum(w for w in weights.values() if w > 0.0)
+            gross_short = -sum(w for w in weights.values() if w < 0.0)
+            borrowed = gross_long - 1.0
             if borrowed > 0.0:
                 equity *= 1.0 - borrowed * margin_rate / PERIODS_PER_YEAR
+            if gross_short > 0.0:
+                equity *= 1.0 - gross_short * borrow_rate / PERIODS_PER_YEAR
 
         # 2. Rebalance day? (signal fires on offset + k*hold_days; execution
         # happens `lag` days later, using the signal date's data.)
@@ -180,11 +205,17 @@ def run_one_offset(
 
             if exposure > 0 and signal_date in by_date:
                 day = by_date[signal_date]
-                if quality_filter_on:
-                    day = strategy.apply_quality_filter(day)
-                top = strategy.top_picks(day, top_n)
+                long_pool = strategy.apply_quality_filter(day) if quality_filter_on else day
+                top = strategy.top_picks(long_pool, top_n)
                 pick_weights = strategy.compute_weights(top, weight_mode)
                 new_weights = {t: w * exposure for t, w in pick_weights.items()}
+                if mode == "top-bottom":
+                    # Short leg: bottom-N from the UNFILTERED slice, equal
+                    # weight (weight_mode='pred' has no sane short analogue).
+                    bottom = strategy.bottom_picks(day, top_n)
+                    short_w = exposure / len(bottom)
+                    for t in bottom["ticker"]:
+                        new_weights[t] = new_weights.get(t, 0.0) - short_w
             else:
                 new_weights = {}
 
@@ -198,7 +229,9 @@ def run_one_offset(
 
         equity_curve[date] = equity
         in_market[date] = bool(weights)
-        holdings[date] = ",".join(sorted(weights.keys())) if weights else ""
+        holdings[date] = ",".join(
+            (t if w > 0 else f"-{t}") for t, w in sorted(weights.items())
+        ) if weights else ""
         exposure_curve[date] = current_exposure
 
     return (
@@ -223,6 +256,8 @@ def run_shifted_starts(
     leverage: float,
     margin_rate: float,
     lag: int = 0,
+    mode: str = strategy.DEFAULT_PORTFOLIO_MODE,
+    borrow_rate: float = strategy.DEFAULT_BORROW_RATE,
 ) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series]:
     """Run `hold_days` backtests at different rebalance offsets.
 
@@ -256,6 +291,7 @@ def run_shifted_starts(
             weight_mode=weight_mode,
             quality_filter_on=quality_filter_on,
             leverage=leverage, margin_rate=margin_rate, lag=lag,
+            mode=mode, borrow_rate=borrow_rate,
         )
         curves[offset] = eq
         tim[offset] = float(inm.mean())
@@ -363,6 +399,27 @@ def _print_stats(label: str, stats: dict, extra: str = "") -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--top-n", type=int, default=strategy.TOP_N)
+    ap.add_argument(
+        "--mode", choices=strategy.PORTFOLIO_MODES,
+        default=strategy.DEFAULT_PORTFOLIO_MODE,
+        help=(
+            "'long-only' (default) = the live strategy. 'top-bottom' = "
+            "market-neutral long/short: long top-N (quality-filtered) AND "
+            "short bottom-N (unfiltered, equal weight) at equal dollars — "
+            "gross 2×exposure, net ≈ 0. Short leg accrues --borrow-rate. "
+            "Outputs get a _top_bottom suffix so canonical long-only "
+            "reports are not overwritten."
+        ),
+    )
+    ap.add_argument(
+        "--borrow-rate", type=float, default=strategy.DEFAULT_BORROW_RATE,
+        help=(
+            "Annual stock-borrow fee on the short leg's gross (top-bottom "
+            f"mode only; default {strategy.DEFAULT_BORROW_RATE:.4f} ≈ "
+            "general collateral for S&P large caps). Does NOT model "
+            "per-name hard-to-borrow specialness."
+        ),
+    )
     ap.add_argument("--hold-days", type=int, default=strategy.HOLD_DAYS)
     ap.add_argument("--cost-bps", type=float, default=strategy.COST_PER_SIDE * 1e4,
                     help="Cost per side in basis points (default 5).")
@@ -444,8 +501,13 @@ def main() -> None:
     qf_label = "ON" if quality_filter_on else "OFF"
     lev_label = f", leverage={args.leverage:.2f}x" if args.leverage != 1.0 else ""
     lag_label = f", lag={args.lag}d" if args.lag != 0 else ""
+    mode_label = "long-only" if args.mode == "long-only" else "top-bottom L/S"
+    if args.mode == "top-bottom":
+        print(f"Mode top-bottom: long top-{args.top_n} (filtered) / short "
+              f"bottom-{args.top_n} (unfiltered), borrow @ "
+              f"{args.borrow_rate:.2%} APR on short gross.")
     if not args.no_overlay:
-        print(f"Running long-only WITH vol-target overlay "
+        print(f"Running {mode_label} WITH vol-target overlay "
               f"(target={args.vol_target:.2f}, {args.hold_days} offsets, "
               f"weight={args.weight}, quality_filter={qf_label}{lev_label}{lag_label})...")
         gated_curves, gated_tim, gated_holdings, gated_avg_exp = run_shifted_starts(
@@ -455,9 +517,10 @@ def main() -> None:
             weight_mode=args.weight,
             quality_filter_on=quality_filter_on,
             leverage=args.leverage, margin_rate=args.margin_rate, lag=args.lag,
+            mode=args.mode, borrow_rate=args.borrow_rate,
         )
 
-    print(f"Running long-only RAW / no overlay ({args.hold_days} offsets, "
+    print(f"Running {mode_label} RAW / no overlay ({args.hold_days} offsets, "
           f"weight={args.weight}, quality_filter={qf_label}{lev_label}{lag_label})...")
     raw_curves, _, raw_holdings, _ = run_shifted_starts(
         test_panel, market,
@@ -466,6 +529,7 @@ def main() -> None:
         weight_mode=args.weight,
         quality_filter_on=quality_filter_on,
         leverage=args.leverage, margin_rate=args.margin_rate, lag=args.lag,
+        mode=args.mode, borrow_rate=args.borrow_rate,
     )
 
     test_start = pd.Timestamp(test_panel["date"].min())
@@ -479,10 +543,13 @@ def main() -> None:
         strategy_end = max(strategy_end, gated_curves.index.max())
     spy_eq = spy_eq_full.loc[:strategy_end]
 
+    spy_daily = spy_eq.pct_change()
+
     stats: dict = {}
     if gated_curves is not None:
         gated_mean = gated_curves.mean(axis=1)
         s = compute_stats(gated_mean)
+        s["corr_to_spy"] = float(gated_mean.pct_change().corr(spy_daily))
         s["avg_time_in_market"] = float(gated_tim.mean())
         s["avg_exposure"] = float(gated_avg_exp.mean())
         s["vol_target"] = float(args.vol_target)
@@ -495,12 +562,14 @@ def main() -> None:
 
     raw_mean = raw_curves.mean(axis=1)
     stats["raw_long_only"] = compute_stats(raw_mean)
+    stats["raw_long_only"]["corr_to_spy"] = float(raw_mean.pct_change().corr(spy_daily))
     stats["raw_long_only"]["avg_time_in_market"] = 1.0
 
     stats["spy_buy_hold"] = compute_stats(spy_eq)
     stats["spy_buy_hold"]["end_date"] = str(strategy_end.date())
 
     stats["config"] = {
+        "mode": args.mode,
         "top_n": args.top_n,
         "hold_days": args.hold_days,
         "cost_bps": args.cost_bps,
@@ -509,11 +578,16 @@ def main() -> None:
         "quality_filter": quality_filter_on,
         "leverage": args.leverage,
         "margin_rate": args.margin_rate,
+        "borrow_rate": args.borrow_rate,
         "lag": args.lag,
     }
 
+    # Non-default modes write to suffixed files so the canonical long-only
+    # reports (committed, referenced by README tables) are never clobbered.
+    suffix = "" if args.mode == "long-only" else "_top_bottom"
+
     os.makedirs(REPORTS_DIR, exist_ok=True)
-    with open(os.path.join(REPORTS_DIR, "backtest_stats.json"), "w") as f:
+    with open(os.path.join(REPORTS_DIR, f"backtest_stats{suffix}.json"), "w") as f:
         json.dump(stats, f, indent=2)
 
     # CSV keeps the full SPY series (extends past strategy end) so the tail
@@ -529,34 +603,40 @@ def main() -> None:
         nav_df_cols["gated_picks_offset0"] = gated_holdings
     nav_df_cols["raw_picks_offset0"] = raw_holdings
     nav_df = pd.DataFrame(nav_df_cols).sort_index()
-    nav_df.to_csv(os.path.join(REPORTS_DIR, "backtest_equity.csv"))
+    nav_df.to_csv(os.path.join(REPORTS_DIR, f"backtest_equity{suffix}.csv"))
 
     if gated_curves is not None:
         plot_equity(
             gated_curves, raw_curves, spy_eq,
-            os.path.join(REPORTS_DIR, "backtest_equity.png"),
+            os.path.join(REPORTS_DIR, f"backtest_equity{suffix}.png"),
         )
 
     print("\nBacktest summary:")
     if args.leverage != 1.0:
         print(f"  (leverage {args.leverage:.2f}x, borrow @ {args.margin_rate:.2%} APR "
               f"charged on gross > 1.0)")
+    if args.mode == "top-bottom":
+        print(f"  (top-bottom L/S: gross = 2×exposure, net ≈ 0; short borrow "
+              f"@ {args.borrow_rate:.2%} APR; corr_to_spy is the number that "
+              f"matters — CAGR is not SPY-comparable)")
     if "gated_long_only" in stats:
         s = stats["gated_long_only"]
         extra = (f"  AvgExp={s['avg_exposure']:.0%}  "
                  f"VolTgt={s['vol_target']:.2f}  "
+                 f"CorrSPY={s['corr_to_spy']:+.2f}  "
                  f"CAGR offset range=[{s['offset_cagr_min']:+.2%}, "
                  f"{s['offset_cagr_max']:+.2%}]")
-        _print_stats(f"vol-targeted long-only (tgt={s['vol_target']:.2f})", s, extra)
-    _print_stats("raw long-only (no overlay)", stats["raw_long_only"])
+        _print_stats(f"vol-targeted {mode_label} (tgt={s['vol_target']:.2f})", s, extra)
+    _print_stats(f"raw {mode_label} (no overlay)", stats["raw_long_only"],
+                 f"  CorrSPY={stats['raw_long_only']['corr_to_spy']:+.2f}")
     _print_stats(
         f"SPY buy & hold (clipped @{strategy_end.date()})",
         stats["spy_buy_hold"],
     )
 
-    print(f"\n  -> equity curve: {REPORTS_DIR}/backtest_equity.png")
-    print(f"  -> stats:        {REPORTS_DIR}/backtest_stats.json")
-    print(f"  -> daily NAV:    {REPORTS_DIR}/backtest_equity.csv")
+    print(f"\n  -> equity curve: {REPORTS_DIR}/backtest_equity{suffix}.png")
+    print(f"  -> stats:        {REPORTS_DIR}/backtest_stats{suffix}.json")
+    print(f"  -> daily NAV:    {REPORTS_DIR}/backtest_equity{suffix}.csv")
 
 
 if __name__ == "__main__":

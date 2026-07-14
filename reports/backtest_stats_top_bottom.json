@@ -1,0 +1,45 @@
+{
+  "gated_long_only": {
+    "cagr": 0.10844624914433387,
+    "ann_vol": 0.18481170781197526,
+    "sharpe": 0.5867931768406442,
+    "max_dd": -0.2655741055801696,
+    "final_nav": 1.743079096049895,
+    "corr_to_spy": 0.6034054483080709,
+    "avg_time_in_market": 0.9926524614254223,
+    "avg_exposure": 0.9524390575395729,
+    "vol_target": 0.2,
+    "offset_cagr_min": 0.07399957234393129,
+    "offset_cagr_max": 0.16137108395088307
+  },
+  "raw_long_only": {
+    "cagr": 0.12263621390493817,
+    "ann_vol": 0.19499051271880796,
+    "sharpe": 0.62893426041599,
+    "max_dd": -0.2682791584861551,
+    "final_nav": 1.866944328667853,
+    "corr_to_spy": 0.6169425326377584,
+    "avg_time_in_market": 1.0
+  },
+  "spy_buy_hold": {
+    "cagr": 0.15487798192251678,
+    "ann_vol": 0.16836809576730044,
+    "sharpe": 0.9198772559414808,
+    "max_dd": -0.24496403026291766,
+    "final_nav": 2.1751861066986353,
+    "end_date": "2026-06-04"
+  },
+  "config": {
+    "mode": "top-bottom",
+    "top_n": 40,
+    "hold_days": 21,
+    "cost_bps": 5.0,
+    "vol_target": 0.2,
+    "weight_mode": "equal",
+    "quality_filter": true,
+    "leverage": 1.0,
+    "margin_rate": 0.0514,
+    "borrow_rate": 0.005,
+    "lag": 0
+  }
+}
