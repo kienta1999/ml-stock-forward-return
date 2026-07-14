@@ -49,6 +49,7 @@ CLI:
 
 import argparse
 import glob
+import json
 import math
 import os
 import subprocess
@@ -62,6 +63,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 _ROOT = os.path.dirname(_HERE)
 PICKS_DIR = os.path.join(_ROOT, "picks")
+BOOK_STATE_PATH = os.path.join(_ROOT, "reports", "live_book.json")
 
 VOL_STALE_DAYS_WARN = 7
 
@@ -552,7 +554,26 @@ def main() -> None:
             print(f"  {tkr:<6} {trade.order.action:<4} "
                   f"{trade.order.totalQuantity:>8.4g} -> {trade.orderStatus.status}"
                   f" (filled {trade.orderStatus.filled:.4g})")
-        print("\nMonitor/adjust remaining working orders in Gateway. Re-run this "
+        # Record the book's intended gross exposure so today.py's daily
+        # de-risk check has a truthful baseline to compare the vol-target
+        # formula against between rebalances.
+        record = dict(
+            executed_at=pd.Timestamp.now().isoformat(timespec="seconds"),
+            account=acct,
+            picks=os.path.relpath(picks_path, _ROOT),
+            equity=round(equity, 2),
+            leverage=args.leverage,
+            vol_target=args.vol_target,
+            gross_exposure=round(float(picks["weight"].sum()) * sizing_leverage, 4),
+        )
+        os.makedirs(os.path.dirname(BOOK_STATE_PATH), exist_ok=True)
+        with open(BOOK_STATE_PATH, "w") as fh:
+            json.dump(record, fh, indent=2)
+            fh.write("\n")
+        print(f"\nBook state -> {BOOK_STATE_PATH} "
+              f"(gross {record['gross_exposure']:.2f}x — today.py's daily "
+              f"de-risk check reads this)")
+        print("Monitor/adjust remaining working orders in Gateway. Re-run this "
               "script later to reconcile any partial fills.")
     finally:
         ib.disconnect()

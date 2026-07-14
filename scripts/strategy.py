@@ -56,6 +56,17 @@ VOL_LOOKBACK = 20
 # leverage is not free, and on a small account the borrow drag is material.
 DEFAULT_MARGIN_RATE = 0.0514
 
+# Live-account gross-exposure cap — the leverage leg of the 2026-07-08
+# rebalance-cadence decision (quarterly @ 1.35x, vol-target 0.20).
+# today.py's daily de-risk check uses it as the formula ceiling and as
+# the worst-case book assumption when reports/live_book.json is absent.
+LIVE_LEVERAGE = 1.35
+
+# De-risk alarm threshold: fire when today's formula exposure drops more
+# than this fraction below the book's exposure (relative, not points).
+# 10% ignores day-to-day vol wiggle but fires on a real regime shift.
+DERISK_TOLERANCE = 0.10
+
 WEIGHT_MODES = ("equal", "pred")
 DEFAULT_WEIGHT_MODE = "equal"
 

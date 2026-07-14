@@ -248,7 +248,12 @@ have no forward-return label yet; `today.py` deliberately predicts on them.
 > - **Fundamentals** — EDGAR XBRL incremental, only new filings
 > - **Features / labels** — pure local recompute against the freshened caches
 > - **Today** — scores against the existing `models/xgb_v1.json`, writes
->   `picks/picks_<date>.csv`, auto-diffs against the most recent prior file
+>   `picks/picks_<date>.csv`, auto-diffs against the most recent prior file,
+>   and runs the **daily de-risk check**: recomputes
+>   `min(1.35, 0.20 / spy_vol_20d)` and yells "⚠⚠ DE-RISK … SELL DOWN TODAY"
+>   if it has fallen >10% below the live book's exposure
+>   (`reports/live_book.json`) — the daily crash guard for the
+>   quarterly-rebalanced levered book
 >
 > Want a model that actually _learns_ on the new data (e.g. after a feature
 > change like the 8-K anchor switch)? Run `run_all.py --retrain` instead —
@@ -329,14 +334,17 @@ structure** (each sleeve held >1yr, one sleeve rebalanced per quarter →
 every sale long-term, quarterly fees) is the taxable-account upgrade
 path if the account grows.
 
-⚠️ **Standing caveat:** the vol-target overlay is only *evaluated at
-rebalance*. Quarterly cadence = up to ~3 months fully levered at 1.35x
+⚠️ **Standing caveat:** the vol-target overlay is only _evaluated at
+rebalance_. Quarterly cadence = up to ~3 months fully levered at 1.35x
 before the overlay reacts to a vol spike (the MaxDD −29% above is from
 a calm window with no such spike; the leave-2008-out stress test was
-−64.6% *unlevered*). Mitigation not yet built (see TODO): a daily
-de-risk check — recompute `min(1.35, 0.20 / spy_vol_20d)` from fresh
-SPY data and sell down off-cycle if it falls materially below current
-exposure. Until then, the quarterly revisit is the only checkpoint.
+−64.6% _unlevered_). **Mitigation (shipped 2026-07-13): the daily
+de-risk check in `today.py`** — every run recomputes
+`min(1.35, 0.20 / spy_vol_20d)` from fresh SPY data, compares it to the
+book's gross exposure (`reports/live_book.json`, written by
+`execute_picks.py --mode live`), and yells "⚠⚠ DE-RISK … SELL DOWN
+TODAY" when the formula falls >10% below the book. Sell-down only —
+re-levering waits for the quarterly rebalance.
 
 ### Live execution (IBKR)
 
@@ -1676,7 +1684,7 @@ underwater plot from the backtest artifacts, picks-concentration audit,
 per-stock attribution, per-rebalance hit rate vs SPY, and a live-picks
 scorecard that marks every `picks/picks_*.csv` to market from cached
 prices (basket incl. cash drag vs SPY over the same 21-trading-day
-window, matured vs open). Sections 1/3-5 measure the *model* on
+window, matured vs open). Sections 1/3-5 measure the _model_ on
 equal-weight offset-0 baskets; section 6 measures what the live pick
 files actually said to hold. Runs automatically as the final, non-fatal
 step of `run_all.py`; `--live-only` is the fast daily path. Outputs:
@@ -1777,8 +1785,8 @@ Where `WC = current_assets − current_liabilities` (already pulled as `mrq_asse
 
 ### 12. Model-architecture experiments — same panel, new objectives (free, ~½–1 day each)
 
-Every signal source so far has been a new *feature*. These are new *models /
-objectives* on the existing 47-feature panel — cheap to try because the data
+Every signal source so far has been a new _feature_. These are new _models /
+objectives_ on the existing 47-feature panel — cheap to try because the data
 layer doesn't change. In rough order of expected fit:
 
 1. **Learning-to-rank objective.** The label, the tuning metric, and the
@@ -1791,7 +1799,7 @@ layer doesn't change. In rough order of expected fit:
    Keep the top-40 mean-return eval metric for early stopping so the
    objective change is the only variable.
 2. **Classification reframing.** Predict `P(stock in top decile of forward
-   21d return)` as binary logistic instead of regressing the demeaned
+21d return)` as binary logistic instead of regressing the demeaned
    return. Robust to the fat-tailed label noise that forces the ±0.5 clip,
    and the predicted probability is a natural position-sizing weight.
    Label build is a per-date `groupby.rank(pct=True) >= 0.9` on the
@@ -1800,10 +1808,10 @@ layer doesn't change. In rough order of expected fit:
    train three boosters, blend their per-date ranks (start with equal
    weights). Short horizons capture reversal, long capture trend; the
    blend usually beats any single horizon.
-4. **Meta-labeling** (López de Prado, *Advances in Financial ML* ch. 3).
+4. **Meta-labeling** (López de Prado, _Advances in Financial ML_ ch. 3).
    A second small model takes the primary model's prediction + regime
    features and predicts "will this pick beat SPY over the hold?" — used
-   for *sizing*, not selection. The principled version of what the
+   for _sizing_, not selection. The principled version of what the
    cataclysmic quality filter does by hand. Needs care to train it on
    out-of-fold primary predictions to avoid leakage.
 5. **Cross-model ensemble.** XGBoost + LightGBM + a ridge regression on
@@ -1868,7 +1876,7 @@ better spent on the ranking objective.
 - [ ] re-run null test on the clean-architecture model (current null-test table is stale)
 - [ ] data: swap yfinance → Sharadar (or equivalent) for delisted-ticker coverage — do before going live
 - [ ] follow-up stability-selection prune now that 4 new features have landed — `excess_ret_5d`, `atr_pct`, `earnings_yield`, `roa_rank` were dead in this single run, but a 5-seed sweep is needed before pruning
-- [ ] 🔴 **daily de-risk check** — small script (or `today.py` mode) that recomputes `min(1.35, 0.20 / spy_vol_20d)` from the freshest cached SPY data and prints "OK — hold" or "⚠ DE-RISK: formula says X%, book is at Y% — sell down today". The quarterly-@-1.35x cadence (see [Rebalance cadence decision](#rebalance-cadence-decision-2026-07-08-quarterly--135x-leverage)) leaves the vol overlay blind for up to ~3 months between rebalances; this check restores daily-granularity crash protection for free (trades only when it fires). Wire into `run_all.py` after diagnostics.
+- [x] 🔴 **daily de-risk check** — **shipped 2026-07-13** as a default step of `today.py` (so `run_all.py` gets it for free). Recomputes `min(--leverage, --vol-target / spy_vol_20d)` from the freshest cached SPY data and compares it against the live book's gross exposure, printing "OK — hold" or "⚠⚠ DE-RISK … SELL DOWN TODAY" with the exact `execute_picks.py` command. Book exposure comes from `reports/live_book.json`, which `execute_picks.py --mode live` now writes after placing orders (seeded retroactively for the 2026-07-06 go-live: gross 1.07x); falls back to the full leverage cap (worst case — can only over-fire, never lull) if the file is missing, or `--book-exposure` to override. Sell-down only by design: when the formula rises back above the book, re-levering waits for the quarterly rebalance. Alarm threshold: formula < book × 0.90 (`--derisk-tolerance`). `--no-derisk` skips.
 - [ ] model: learning-to-rank objective (`rank:pairwise` / `rank:ndcg`, date as group key) — direct match to top-40 selection; keep the top-40 mean-return eval metric so the objective is the only variable. See [§12](#12-model-architecture-experiments--same-panel-new-objectives-free-1-day-each).
 - [ ] model: classification reframing — binary logistic on `P(top decile of forward 21d return)`; robust to fat-tailed labels, probability doubles as a sizing weight. See [§12](#12-model-architecture-experiments--same-panel-new-objectives-free-1-day-each).
 - [ ] labels: multi-horizon blend — add 5d + 63d forward labels, train 3 boosters, blend per-date ranks. See [§12](#12-model-architecture-experiments--same-panel-new-objectives-free-1-day-each).
@@ -1940,3 +1948,4 @@ for history but it no longer blocks.
 claude --resume eabad73f-1806-46e5-99e1-4f4c8817d4ba
 Live ibkr place trade: claude --resume 86203dd8-11fa-43ed-a889-a7213c2e3af3
 July trade placed: claude --resume 944406b7-7f36-440e-884d-723e320df5fa
+Quarterly rebalance: claude --resume c55b3738-bfb1-40ea-8d4e-eeadb095d308

@@ -18,19 +18,32 @@ needs prices 21 days ahead — but those rows still have valid *features*
 and are exactly the ones we need to score live. Reading features.parquet
 also means `labels.py` does not need to be re-run for today's picks.
 
+Every run also performs the daily DE-RISK CHECK for the live book: the
+account rebalances quarterly, but the vol-target overlay is only evaluated
+at rebalance — a mid-cycle vol spike would leave the book levered while the
+formula says to be smaller. The check recomputes
+min(leverage, vol_target / spy_vol_20d) from the freshest cached SPY data,
+compares it against the book's exposure (reports/live_book.json, written by
+execute_picks.py --mode live), and prints "OK — hold" or a loud
+"⚠ DE-RISK ... sell down today". Sell-down only: when the formula rises
+back above the book, re-levering waits for the quarterly rebalance.
+
 CLI:
     uv run python scripts/today.py
     uv run python scripts/today.py --top-n 25
     uv run python scripts/today.py --vol-target 0.15   # more conservative sizing
     uv run python scripts/today.py --no-overlay        # ignore vol-target (always 100%)
     uv run python scripts/today.py --diff picks/picks_2026-04-28.csv
+    uv run python scripts/today.py --book-exposure 1.2 # override live_book.json
+    uv run python scripts/today.py --no-derisk         # skip the de-risk check
 
 Outputs:
-    stdout: SPY 20d vol + recommended exposure + top-N tickers with deploy weights
+    stdout: SPY 20d vol + recommended exposure + de-risk check + top-N picks
     picks/picks_<latest_date>.csv: machine-readable picks (weights already scaled)
 """
 
 import argparse
+import json
 import os
 import sys
 import warnings
@@ -50,6 +63,7 @@ from features import load_features  # noqa: E402
 _ROOT = os.path.dirname(_HERE)
 MODEL_PATH = os.path.join(_ROOT, "models", "xgb_v1.json")
 PICKS_DIR = os.path.join(_ROOT, "picks")
+BOOK_STATE_PATH = os.path.join(_ROOT, "reports", "live_book.json")
 
 STALE_DAYS_WARN = 7
 
@@ -87,6 +101,56 @@ def _print_vol_regime(market_row: pd.Series, vol_target: float) -> float:
     print(f"  Target vol:          {vol_target:.2%}")
     print(f"  → Recommended exposure: {exposure:.1%}  ({label})")
     return exposure
+
+
+def _print_derisk_check(
+    market_row: pd.Series,
+    vol_target: float,
+    leverage: float,
+    book_override: float | None,
+    tolerance: float,
+) -> None:
+    """Daily de-risk check — off-cycle SELL-DOWN alarm for the live book.
+
+    The book's exposure comes from reports/live_book.json (recorded by
+    execute_picks.py --mode live at each rebalance), a --book-exposure
+    override, or — worst case, when neither exists — the full leverage
+    cap, so a missing state file can only make the check MORE likely to
+    fire, never silently lull.
+    """
+    spy_vol = float(market_row["spy_vol_20d"])
+    asof = pd.Timestamp(market_row.name).date()
+    formula = strategy.vol_target_exposure(spy_vol, vol_target, max_exposure=leverage)
+
+    if book_override is not None:
+        book, src = book_override, "--book-exposure override"
+    else:
+        book, src = None, ""
+        if os.path.exists(BOOK_STATE_PATH):
+            try:
+                with open(BOOK_STATE_PATH) as fh:
+                    state = json.load(fh)
+                book = float(state["gross_exposure"])
+                src = (f"set {str(state.get('executed_at', '?'))[:10]}, "
+                       f"reports/live_book.json")
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError):
+                print(f"\n  ⚠ could not parse {BOOK_STATE_PATH} — ignoring it")
+        if book is None:
+            book = leverage
+            src = "no reports/live_book.json — assuming full cap (worst case)"
+
+    print("\nDe-risk check (daily crash guard for the quarterly-rebalanced book):")
+    print(f"  Book gross exposure: {book:.2f}x  ({src})")
+    print(f"  Formula today:       min({leverage:.2f}, {vol_target:.2f} / "
+          f"{spy_vol:.3f}) = {formula:.2f}x  (SPY vol as of {asof})")
+    if formula < book * (1.0 - tolerance):
+        print(f"  → ⚠⚠ DE-RISK: formula says {formula:.2f}x, book is at "
+              f"{book:.2f}x — SELL DOWN TODAY:")
+        print(f"       uv run python scripts/execute_picks.py --port 4001 "
+              f"--leverage {leverage} --vol-target {vol_target} --mode live")
+    else:
+        print(f"  → OK — hold (formula within {tolerance:.0%} of book; "
+              f"re-levering waits for the quarterly rebalance)")
 
 
 def _print_picks(picks_df: pd.DataFrame, latest_date: pd.Timestamp, top_n: int) -> None:
@@ -152,6 +216,42 @@ def main() -> None:
         help="Path to a previous picks CSV to compute BUY/SELL/HOLD list against.",
     )
     ap.add_argument(
+        "--leverage",
+        type=float,
+        default=strategy.LIVE_LEVERAGE,
+        help=(
+            "Gross-exposure cap used by the de-risk check's formula "
+            f"(default {strategy.LIVE_LEVERAGE} — the live-account config). "
+            "Does NOT change the picks CSV weights; leverage is applied at "
+            "execution by execute_picks.py."
+        ),
+    )
+    ap.add_argument(
+        "--book-exposure",
+        type=float,
+        default=None,
+        help=(
+            "Current gross exposure of the live book, for the de-risk check. "
+            "Default: reports/live_book.json (written by execute_picks.py "
+            "--mode live), else the full --leverage cap (worst case)."
+        ),
+    )
+    ap.add_argument(
+        "--derisk-tolerance",
+        type=float,
+        default=strategy.DERISK_TOLERANCE,
+        help=(
+            "Relative drop of formula-vs-book that triggers the DE-RISK alarm "
+            f"(default {strategy.DERISK_TOLERANCE:.2f} = fire when formula < "
+            "book × 0.90)."
+        ),
+    )
+    ap.add_argument(
+        "--no-derisk",
+        action="store_true",
+        help="Skip the daily de-risk check.",
+    )
+    ap.add_argument(
         "--weight",
         choices=strategy.WEIGHT_MODES,
         default=strategy.DEFAULT_WEIGHT_MODE,
@@ -198,6 +298,17 @@ def main() -> None:
         print("\n(--no-overlay): vol-target disabled — picks at 100% exposure.")
     else:
         exposure = _print_vol_regime(latest_market_row, args.vol_target)
+
+    # Daily de-risk check — independent of the picks overlay above (that
+    # scales the CSV weights; this guards the already-executed live book).
+    if not args.no_derisk:
+        _print_derisk_check(
+            latest_market_row,
+            args.vol_target,
+            args.leverage,
+            args.book_exposure,
+            args.derisk_tolerance,
+        )
 
     if exposure <= 0:
         # Defensive: vol_target_exposure clamps at [0, 1] and only returns 0
