@@ -1,4 +1,4 @@
-# ml-stock-forward-return
+# ranker-21d-sp500
 
 ML-based S&P 500 stock ranker. Predict each stock's forward 21-trading-day
 return independently with XGBoost, sort to get a daily ranking, long the top
@@ -1920,7 +1920,7 @@ better spent on the ranking objective.
 - [ ] labels: multi-horizon blend — add 5d + 63d forward labels, train 3 boosters, blend per-date ranks. See [§12](#12-model-architecture-experiments--same-panel-new-objectives-free-1-day-each).
 - [ ] model: meta-labeling — second model predicts P(pick beats SPY) for sizing, trained on out-of-fold primary predictions. See [§12](#12-model-architecture-experiments--same-panel-new-objectives-free-1-day-each).
 - [ ] system: cross-model ensemble (XGBoost + LightGBM + ridge-on-ranks, per-date rank average) — after the 5-seed ensemble (§5) lands. See [§12](#12-model-architecture-experiments--same-panel-new-objectives-free-1-day-each).
-- [ ] cross-project: point-in-time backtest of the `single-stock-pick-from-sp500` deterministic funnel against this repo's panel (membership history + OHLCV + XBRL fundamentals) — validates that doctrine's quality gates historically; see that repo's README roadmap.
+- [ ] cross-project: point-in-time backtest of the `conviction-pick-sp500` deterministic funnel against this repo's panel (membership history + OHLCV + XBRL fundamentals) — validates that doctrine's quality gates historically; see that repo's README roadmap.
 - [ ] 🔴 **train.py: replace optuna objective (val decile spread) with a top-40-aligned metric** — empirical anti-correlation observed during the 8-K work (May 2026): a 350-trial sweep maximised val decile spread to 0.0183 but backtested at +18.81% raw CAGR, while `--quick` with saved DEFAULT_PARAMS (val decile spread 0.0161) backtested at +21.60%. Decile spread averages ranking across deciles 1 & 10 (~50 names each) but the strategy holds only the top 40 — the very tip of decile 1. Replace `_compute_decile_spread()` with cumulative log return (or Sharpe) of an equal-weighted top-40 portfolio over val. Until this lands, **do not run `train.py --trials N`** — the saved DEFAULT_PARAMS are the current best model. Also lower `reg_lambda` floor from 0.001 (already done) — no other range changes pending.
 
 Paste this to claude to ask

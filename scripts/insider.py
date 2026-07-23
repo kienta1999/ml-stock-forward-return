@@ -75,7 +75,7 @@ BULK_BASE_URL = (
     "insider-transactions-data-sets/{q}_form345.zip"
 )
 BULK_HEADERS = {
-    "User-Agent": "ml-stock-forward-return research bot talekien1710@gmail.com",
+    "User-Agent": "ranker-21d-sp500 research bot talekien1710@gmail.com",
     "Accept-Encoding": "gzip, deflate",
     "Host": "www.sec.gov",
 }

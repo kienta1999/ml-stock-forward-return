@@ -62,7 +62,7 @@ UPCOMING_PATH = os.path.join(EARNINGS_DIR, "_upcoming.parquet")
 # SEC asks for a descriptive User-Agent with contact info. They throttle
 # anonymous traffic and 403 abusive clients. Keep below 10 req/sec.
 SEC_HEADERS = {
-    "User-Agent": "ml-stock-forward-return research bot",
+    "User-Agent": "ranker-21d-sp500 research bot",
     "Accept-Encoding": "gzip, deflate",
     "Host": "data.sec.gov",
 }

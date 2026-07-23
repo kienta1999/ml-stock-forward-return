@@ -51,7 +51,7 @@ SHORT_DIR = os.path.join(_ROOT, "data", "short_interest")
 FINRA_URL = "https://cdn.finra.org/equity/otcmarket/biweekly/shrt{ymd}.csv"
 FINRA_PUBLISH_LAG_BDAYS = 8  # FINRA publishes ~8 business days after settlement
 FINRA_HEADERS = {
-    "User-Agent": "ml-stock-forward-return research bot",
+    "User-Agent": "ranker-21d-sp500 research bot",
     "Accept": "text/csv,text/plain,*/*",
 }
 # FINRA's CDN archive starts mid-2018. The page advertises "back to 2014" but

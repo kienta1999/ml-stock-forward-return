@@ -1,5 +1,5 @@
 [project]
-name = "ml-stock-forward-return"
+name = "ranker-21d-sp500"
 version = "0.1.0"
 description = "ML-based S&P 500 ranker: predict 21d forward return per stock, long top decile."
 requires-python = ">=3.11"
