@@ -438,7 +438,7 @@ Key flags:
 | Flag             | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `--mode`         | `print` (default, safe) · `whatif` (cost preview) · `live` (places orders)                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `--top-n`        | Trade only the top N picks by `predicted_return`, weights rescaled to preserve the CSV's gross exposure (composes with `--vol-target`). **40 = backtest canonical and 2008-stress-tested; 20 backtests better (raw CAGR 34.5% vs 28.2%, Sharpe within noise) and halves fixed order costs — but is UNVERIFIED in the leave-2008-out stress test and holds ~70% tech vs 65% at 40.** Both are reasonable; verify 20 in the 2008 walk-forward before switching real money to it. |
+| `--top-n`        | Trade only the top N picks by `predicted_return`, weights rescaled to preserve the CSV's gross exposure (composes with `--vol-target`). **40 = backtest canonical and 2008-stress-tested; 20 backtests better (raw CAGR 34.5% vs 28.2%, Sharpe within noise) and halves fixed order costs. 20 is now leave-2008-out verified (2026-07-23): it SURVIVES (stays positive, beats SPY) but is the more fragile basket — deeper crash MaxDD and its offset-luck range goes negative where 40's stays positive (see "Basket size in the 2008 stress test" below). It also holds ~70% tech vs 65% at 40.** **Live choice: 20** — better return + cleaner sizing at low capital, and 2008-survivable; the extra tail robustness of 40 is a minor (~3-4 pt) drawdown effect vs leverage, which is the real tail lever. |
 | `--fractional`   | Fractional-share orders so a small account deploys ~100% instead of stranding cash on pricey names that round to 0 whole shares. ⚠️ **IBKR frequently rejects fractional over the API** (error 10243/10244 — needs the fractional-shares permission enabled, and may be desktop-TWS-only). Verify with `--mode whatif` first. RTH only.                                                                                                                                        |
 | `--leverage`     | Gross exposure multiplier (default 1.0 = cash-only). >1.0 borrows on margin (~5.14% APR).                                                                                                                                                                                                                                                                                                                                                                                      |
 | `--vol-target`   | Backtest-matching overlay for leveraged sizing: gross = `min(leverage, X / spy_vol_20d)` from the freshest cached SPY data, CSV weights renormalized to 1.0 first. Bare flag = 0.20 (the backtest default); values ≤ 0 or > 1 rejected (percent typo guard). Omit → flat leverage multiple (more exposure in stress than the backtest models).                                                                                                                                 |
@@ -873,6 +873,44 @@ Properties:
 - **Empirical 2008 stress test** (leave-2008-out walk-forward, train
   2010-2019 / test 2007-2009): raw MaxDD -64.6%, raw CAGR +6.9% vs
   SPY -5.7%. Vol-target overlay sized exposure down hard during Sep-Nov 2008. To re-run this experiment: see `dataset.py` constants and `TEST_END`.
+
+#### Basket size in the 2008 stress test (top-20 vs top-40, 2026-07-23)
+
+Re-ran the leave-2008-out walk-forward for both basket sizes on the **same**
+2008-unseen model (`train.py --quick`, train 2010-2017 / val 2018-2019, test
+2007-01→2009-12). Resolves the long-standing "top-20 UNVERIFIED in 2008" flag.
+All numbers **unlevered**:
+
+| Metric (2007-2009)      | top-20         | top-40        | SPY    |
+| ----------------------- | -------------- | ------------- | ------ |
+| vol-target CAGR         | +2.92%         | +5.01%        | -5.66% |
+| vol-target MaxDD        | -48.2%         | -44.6%        | -55.2% |
+| vol-target Sharpe       | 0.09           | 0.17          | -0.19  |
+| offset-luck CAGR range  | [-3.7%, +9.8%] | [+0.6%,+10.2%]| —      |
+| raw (no overlay) MaxDD  | -61.4%         | -58.0%        | —      |
+
+**Verdict:** top-20 SURVIVES 2008 out-of-sample (positive CAGR, beats SPY) —
+it does not detonate — but it is the more fragile basket on every risk axis:
+deeper MaxDD (raw and gated), lower crash CAGR, and its offset-luck range dips
+**negative** (worst rebalance-timing loses money) while top-40 stays positive
+across all 21 offsets. This is the concentration premium: same Sharpe in the
+calm 2021→ window, more tail fragility in a crash.
+
+**Two caveats before reading this as comfort:** (1) these are *unlevered* — at
+the live 1.35x, the -48%/-61% top-20 drawdowns scale past -50% (margin-call
+territory), so **basket size is a minor (~3-4 pt) tail lever vs leverage**,
+which is the dominant one. (2) The vol-target overlay averaged only **~83%**
+exposure through this window — 2008 was sustained high vol, not a single
+spike, so the overlay is *not* a full parachute in a grinding crash; the daily
+`today.py` de-risk helps but can't defy a persistent-vol regime. (The
+leave-out model is also deliberately weak — val IC ~0.01 — so this is a
+structural stress test of basket size + overlay, not a P&L forecast.)
+
+**Decision (unchanged, now evidence-backed): stay at top-20, rebalance
+quarterly.** 20 wins on return + capital fit and is 2008-survivable; quarterly
+cadence is a coin-flip-gross tie with monthly that wins on costs/taxes (see
+"Rebalance cadence decision"). Tail risk is controlled with leverage + daily
+de-risk, not basket size.
 - **Empirical 2021-2026** (no real vol-bomb in this window): vol-target's
   average exposure stayed ~95% — overlay barely activated because the 2022
   bear was a slow grind, not a vol explosion. MaxDD improved ~2pts vs raw
