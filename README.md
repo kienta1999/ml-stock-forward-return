@@ -211,7 +211,24 @@ uv run python scripts/execute_picks.py --port 4001                   # print reb
 uv run python scripts/execute_picks.py --port 4001 --mode whatif --leverage 1.35 --vol-target 0.2 --top-n 20 --max-notional 10000  # IBKR commission/margin preview — still places nothing
 uv run python scripts/execute_picks.py --port 4001 --fractional      # deploy ~100% of a small account (fractional shares)
 uv run python scripts/execute_picks.py --port 4001 --mode live --leverage 1.35 --vol-target 0.2 --top-n 20  # ⚠️ places real orders (gated by cap + typed confirm)
+
+# ── Alternatively, with NO API at all (IBKR Lite, or just not paying for Pro market data) ──
+# The /ibkr-web-trade skill does the same rebalance through the free web Client Portal, driven
+# by Playwright: positions, NetLiquidation, quotes and order tickets all come from the logged-in
+# portal session. Same sizing code (--broker web), same circuit breaker, no IB Gateway.
+# In Claude Code:
+#   /ibkr-web-trade                       # = the --mode live line above, on the newest picks CSV
+#   /ibkr-web-trade mode whatif           # commission/margin preview, places nothing
+#   /ibkr-web-trade top-n 40              # any flag above overrides the default
+# You log in yourself (2FA included) in the browser it opens; it confirms the plan with you,
+# then the final order list, before anything is submitted.
 ```
+
+> **On IBKR Lite / no market-data subscription?** `.claude/skills/ibkr-web-trade`
+> is the API-free path: `/ibkr-web-trade` in Claude Code opens the web Client
+> Portal in Playwright, you log in, and it runs the identical rebalance
+> (`--broker web`) through the portal's own order tickets — plan confirmation
+> and a final go/no-go both required before it submits.
 
 > **Automating orders?** See **### Live execution (IBKR)** below for Gateway
 > setup, WSL↔Windows networking, the print → whatif → live workflow, and the

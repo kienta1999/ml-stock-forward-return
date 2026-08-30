@@ -17,3 +17,8 @@ data/insider/
 # models/*.json
 # reports/*.png
 # reports/*.json
+
+# Per-run scratch from the --broker web path (account snapshot + order list)
+reports/web_account.json
+reports/web_orders.json
+.playwright-mcp/

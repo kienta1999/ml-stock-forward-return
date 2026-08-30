@@ -40,8 +40,20 @@ route unless --host is given. --port is REQUIRED, no default (4002 = paper,
 4001 = live) so the live/paper choice is always explicit. See
 scripts/check_ibkr_conn.py first.
 
+Brokers:
+    --broker ib   (default) IB Gateway API. Needs IBKR Pro + a data subscription.
+    --broker web  no API at all. Account equity/positions come from
+                  --account-state (a JSON an agent scrapes off the free Client
+                  Portal Portfolio page), prices from Yahoo, and the resulting
+                  orders are written to reports/web_orders.json for that agent
+                  to type into the Client Portal order tickets. Same sizing,
+                  same reconciliation, same circuit breaker — only the venue
+                  changes. See .claude/skills/ibkr-web-trade.
+
 CLI:
     uv run python scripts/execute_picks.py --port 4001                 # print plan (safe)
+    uv run python scripts/execute_picks.py --broker web --mode live --leverage 1.35 \
+        --vol-target 0.2 --top-n 20                                    # web venue
     uv run python scripts/execute_picks.py --port 4001 --mode whatif   # cost preview
     uv run python scripts/execute_picks.py --picks picks/picks_2026-06-30.csv --port 4001
     uv run python scripts/execute_picks.py --port 4001 --mode live --max-notional 10000
@@ -64,8 +76,11 @@ if _HERE not in sys.path:
 _ROOT = os.path.dirname(_HERE)
 PICKS_DIR = os.path.join(_ROOT, "picks")
 BOOK_STATE_PATH = os.path.join(_ROOT, "reports", "live_book.json")
+WEB_ACCOUNT_PATH = os.path.join(_ROOT, "reports", "web_account.json")
+WEB_ORDERS_PATH = os.path.join(_ROOT, "reports", "web_orders.json")
 
 VOL_STALE_DAYS_WARN = 7
+ACCOUNT_STATE_MAX_AGE_MIN = 60   # --broker web: stale positions double-buy
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -154,6 +169,42 @@ def get_prices(ib, contracts: dict) -> dict:
             if px:
                 prices[t] = px
     return prices
+
+
+def get_prices_yf(tickers: list) -> dict:
+    """ticker -> latest price from Yahoo, in one batched request.
+
+    Stands in for IBKR's market-data feed under --broker web. Yahoo's daily bar
+    tracks the live last price during RTH and holds the prior close after
+    hours — the same accuracy class as the 15-min-delayed IBKR feed get_prices
+    asks for. Anything Yahoo drops falls back to the local data/raw cache.
+    """
+    import yfinance as yf
+
+    out = {}
+    try:
+        df = yf.download(tickers, period="5d", interval="1d",
+                         progress=False, auto_adjust=False)
+        close = df["Close"] if "Close" in df.columns else df
+        if isinstance(close, pd.Series):
+            close = close.to_frame(tickers[0])
+        for t in tickers:
+            if t in close.columns:
+                col = close[t].dropna()
+                if not col.empty:
+                    out[t] = float(col.iloc[-1])
+    except Exception as e:
+        print(f"⚠  Yahoo batch quote failed ({e}) — falling back to the cache.")
+    for t in tickers:
+        if out.get(t):
+            continue
+        cached = os.path.join(_ROOT, "data", "raw", f"{t}.parquet")
+        if os.path.exists(cached):
+            col = pd.read_parquet(cached)["Close"].dropna()
+            if not col.empty:
+                out[t] = float(col.iloc[-1])
+                print(f"⚠  {t}: no Yahoo quote — cached close {out[t]:,.2f}")
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -290,6 +341,200 @@ def print_plan(plan: pd.DataFrame) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# --broker web: no API, orders handed to a browser agent
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def run_web(args, picks, picks_path, sizing_leverage, gross_target) -> None:
+    """Rebalance with no IBKR API: account state from JSON, prices from Yahoo.
+
+    IBKR Pro bills for the API's market data; the web Client Portal is free, so
+    the agent reads the Portfolio page into --account-state and places the
+    orders written here through the UI. Everything between — sizing, the vol
+    overlay, reconciliation against held shares, the notional circuit breaker —
+    is the same code the --broker ib path runs.
+    """
+    if not os.path.exists(args.account_state):
+        sys.exit(f"No account state at {args.account_state}. Write it from the "
+                 f'Client Portal Portfolio page: {{"account": "U...", '
+                 f'"equity": 30000.0, "captured_at": "<ISO now>", '
+                 f'"positions": {{"AAPL": 10}}}}')
+    with open(args.account_state) as fh:
+        state = json.load(fh)
+    acct = str(state["account"])
+    equity = float(state["equity"])
+    current_shares = {str(k).upper(): float(v)
+                      for k, v in (state.get("positions") or {}).items()
+                      if float(v) != 0}
+
+    # Positions read minutes ago are fine; positions read yesterday re-buy a
+    # book you already hold. Only live mode is fatal — print/whatif are safe.
+    captured = state.get("captured_at")
+    age_min = None
+    if captured:
+        ts = pd.Timestamp(captured)          # tz-aware if the browser sent "...Z"
+        now = pd.Timestamp.now(tz=ts.tz) if ts.tz is not None else pd.Timestamp.now()
+        age_min = abs((now - ts).total_seconds()) / 60   # abs: clock skew is staleness too
+    if args.mode == "live" and (age_min is None or age_min > ACCOUNT_STATE_MAX_AGE_MIN):
+        stale = "no captured_at" if age_min is None else f"{age_min:.0f} min old"
+        sys.exit(f"🛑 ABORT: {args.account_state} is {stale}. Re-read the "
+                 f"Portfolio page before placing live orders — stale positions "
+                 f"double-buy names you already hold.")
+
+    live_acct = not acct.startswith("DU")
+    print(f"Account: {acct}  ({'LIVE — REAL MONEY' if live_acct else 'paper'})  "
+          f"NetLiquidation=${equity:,.2f}  [Client Portal, no API]")
+    print(f"  {len(current_shares)} held name(s), captured "
+          f"{'unknown' if age_min is None else f'{age_min:.0f} min'} ago")
+
+    tickers = sorted(set(picks["ticker"]) | set(current_shares))
+    conids = {str(k).upper(): v for k, v in (state.get("conids") or {}).items()}
+    # The Client Portal hands back a live quote with every position and every
+    # conid lookup, so the state file normally already carries the prices.
+    # Yahoo is only the gap-filler for names it had none for.
+    prices = {str(k).upper(): float(v)
+              for k, v in (state.get("prices") or {}).items() if v}
+    gaps = [t for t in tickers if not prices.get(t)]
+    if gaps:
+        print(f"Fetching {len(gaps)} missing price(s) from Yahoo ...")
+        prices.update(get_prices_yf(gaps))
+    missing = [t for t in tickers if not prices.get(t)]
+    if missing:
+        print(f"⚠  no price (skipping): {', '.join(missing)}")
+
+    # A symbol like STX matches five listings worldwide (Seagate on NASDAQ, but
+    # also a EUREX index and an ASX miner); resolve the wrong conid and the plan
+    # sizes — and would trade — the wrong instrument. Every quote is checked
+    # against the local daily cache, and anything wildly off blocks the trade.
+    suspect = []
+    for t in sorted(prices):
+        cached = os.path.join(_ROOT, "data", "raw", f"{t}.parquet")
+        if not os.path.exists(cached):
+            continue
+        col = pd.read_parquet(cached)["Close"].dropna()
+        if col.empty:
+            continue
+        ref = float(col.iloc[-1])
+        if ref > 0 and not 0.5 <= prices[t] / ref <= 2.0:
+            suspect.append((t, prices[t], ref))
+    for t, px, ref in suspect:
+        print(f"⚠  {t}: quote {px:,.2f} vs cached close {ref:,.2f} "
+              f"({px / ref:.1f}x) — wrong listing, or a stale cache?")
+    if suspect and args.mode != "print":
+        sys.exit(f"🛑 ABORT: price sanity check failed for "
+                 f"{', '.join(t for t, _, _ in suspect)}. Re-resolve those "
+                 f"conids to the US listing, or refresh scripts/data.py.")
+
+    plan = build_plan(picks, equity, prices, current_shares,
+                      leverage=sizing_leverage, min_order=args.min_order,
+                      fractional=args.fractional)
+    print_plan(plan)
+
+    trades = plan[plan["delta"] != 0].copy()
+    buy_notional = float(trades[trades["delta"] > 0]["notional"].sum())
+    sell_notional = float(trades[trades["delta"] < 0]["notional"].sum())
+    print(f"\nPlan: {int((trades['delta'] > 0).sum())} buys (${buy_notional:,.0f}), "
+          f"{int((trades['delta'] < 0).sum())} sells (${sell_notional:,.0f}), "
+          f"{int((plan['action'] == 'HOLD').sum())} holds.")
+
+    cap = (args.max_notional if args.max_notional is not None
+           else equity * gross_target * 1.05)
+    if buy_notional > cap:
+        sys.exit(f"\n🛑 ABORT: buy notional ${buy_notional:,.0f} exceeds cap "
+                 f"${cap:,.0f}. Raise --max-notional if intended.")
+    if trades.empty:
+        print("\nNothing to do — book already matches picks.")
+        return
+    if args.mode == "print":
+        print("\n[print mode] No order file written. --mode whatif writes the "
+              "order list for a UI cost preview; --mode live for execution.")
+        return
+
+    # Sells first: the UI places one ticket at a time, so freeing the cash
+    # before spending it keeps a cash-ish account from tripping on buying power.
+    slip = args.slippage_bps / 1e4
+    stamp = pd.Timestamp.now()
+    orders = []
+    for r in trades.itertuples():
+        buy = r.delta > 0
+        qty = abs(r.delta)
+        orders.append(dict(
+            ticker=r.ticker,
+            conid=conids.get(r.ticker),
+            # Client order id: IBKR rejects a repeat, so re-running the placement
+            # step on the same order file cannot double-submit. A fresh plan gets
+            # a fresh stamp and is allowed through.
+            coid=f"RK{stamp:%m%d%H%M}{r.ticker}"[:36],
+            action="BUY" if buy else "SELL",
+            qty=int(qty) if float(qty).is_integer() else round(float(qty), 4),
+            ref_price=round(float(r.price), 4),
+            limit=round(float(r.price) * ((1 + slip) if buy else (1 - slip)), 2),
+            notional=round(float(r.notional), 2),
+        ))
+    orders.sort(key=lambda o: (o["action"] != "SELL", o["ticker"]))
+
+    payload = dict(
+        created_at=stamp.isoformat(timespec="seconds"),
+        mode=args.mode,
+        account=acct,
+        picks=os.path.relpath(picks_path, _ROOT),
+        equity=round(equity, 2),
+        order_type="LMT", tif="DAY", outside_rth=False,
+        slippage_bps=args.slippage_bps,
+        buy_notional=round(buy_notional, 2),
+        sell_notional=round(sell_notional, 2),
+        orders=orders,
+        book=dict(
+            executed_at=None,
+            account=acct,
+            picks=os.path.relpath(picks_path, _ROOT),
+            equity=round(equity, 2),
+            leverage=args.leverage,
+            vol_target=args.vol_target,
+            gross_exposure=round(float(picks["weight"].sum()) * sizing_leverage, 4),
+        ),
+    )
+    os.makedirs(os.path.dirname(WEB_ORDERS_PATH), exist_ok=True)
+    with open(WEB_ORDERS_PATH, "w") as fh:
+        json.dump(payload, fh, indent=2)
+        fh.write("\n")
+    print(f"\n{len(orders)} order(s) -> {WEB_ORDERS_PATH}")
+    if args.mode == "whatif":
+        print("[whatif mode] Feed these to the portal's whatif endpoint for "
+              "IBKR's commission/margin preview — nothing is placed.")
+    else:
+        print(f"[live mode] Submit these through the Client Portal, sells "
+              f"first — limits are {args.slippage_bps:.0f} bps through the "
+              f"reference quote. Re-capture the account and re-plan if the "
+              f"market has moved since. After the fills: --record-book.")
+
+
+def record_book() -> None:
+    """Copy the last live web order file's book state into live_book.json.
+
+    Run only after the browser has actually placed the orders: today.py's daily
+    de-risk check reads this file for the book's intended gross exposure, and
+    --broker ib writes it at the same point (right after placeOrder).
+    """
+    if not os.path.exists(WEB_ORDERS_PATH):
+        sys.exit(f"No {WEB_ORDERS_PATH} — nothing to record.")
+    with open(WEB_ORDERS_PATH) as fh:
+        payload = json.load(fh)
+    if payload.get("mode") != "live":
+        sys.exit(f"{WEB_ORDERS_PATH} was written in --mode {payload.get('mode')} "
+                 f"— only a live run changes the book.")
+    record = payload["book"]
+    record["executed_at"] = pd.Timestamp.now().isoformat(timespec="seconds")
+    record["venue"] = "client-portal-web"
+    os.makedirs(os.path.dirname(BOOK_STATE_PATH), exist_ok=True)
+    with open(BOOK_STATE_PATH, "w") as fh:
+        json.dump(record, fh, indent=2)
+        fh.write("\n")
+    print(f"Book state -> {BOOK_STATE_PATH} "
+          f"(gross {record['gross_exposure']:.2f}x — today.py reads this)")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -306,9 +551,28 @@ def main() -> None:
                          "UNVERIFIED in the leave-2008-out stress test.")
     ap.add_argument("--host", default=None,
                     help="Gateway host. Default: auto-detect WSL->Windows gateway.")
-    ap.add_argument("--port", type=int, required=True,
-                    help="API port — REQUIRED, no default (4002 = Gateway paper, "
-                         "4001 = live) so live vs. paper is always a conscious choice.")
+    ap.add_argument("--port", type=int, default=None,
+                    help="API port — REQUIRED with --broker ib, no default "
+                         "(4002 = Gateway paper, 4001 = live) so live vs. paper "
+                         "is always a conscious choice.")
+    ap.add_argument("--broker", choices=("ib", "web"), default="ib",
+                    help="ib = IB Gateway API (needs an IBKR Pro data sub). "
+                         "web = no API: account state read from --account-state, "
+                         "prices from Yahoo, orders written to reports/"
+                         "web_orders.json for an agent to place in the free "
+                         "Client Portal UI.")
+    ap.add_argument("--account-state", default=WEB_ACCOUNT_PATH,
+                    help="--broker web: JSON with account/equity/positions/"
+                         "captured_at scraped from the Client Portal Portfolio "
+                         f"page (default {os.path.relpath(WEB_ACCOUNT_PATH, _ROOT)}).")
+    ap.add_argument("--dump-tickers", action="store_true",
+                    help="Print the traded tickers (after --top-n) as one "
+                         "comma-separated line and exit — the browser step "
+                         "needs the same selection this script would trade.")
+    ap.add_argument("--record-book", action="store_true",
+                    help="--broker web: after the browser has placed the orders, "
+                         "stamp reports/live_book.json from reports/"
+                         "web_orders.json. Does nothing else.")
     ap.add_argument("--client-id", type=int, default=20)
     ap.add_argument("--mode", choices=("print", "whatif", "live"), default="print",
                     help="print = plan only (safe); whatif = cost preview; "
@@ -343,6 +607,12 @@ def main() -> None:
                          "equity * leverage * 1.05. Abort if the plan exceeds it.")
     args = ap.parse_args()
 
+    if args.record_book:
+        record_book()
+        return
+    if args.broker == "ib" and args.port is None:
+        ap.error("--port is required with --broker ib (4002 = paper, 4001 = live).")
+
     if args.vol_target is not None and not 0.0 < args.vol_target <= 1.0:
         sys.exit(f"--vol-target {args.vol_target} looks wrong — it is an annualized "
                  f"vol FRACTION (0.20 = 20%). A value > 1 would never bind and "
@@ -363,9 +633,13 @@ def main() -> None:
                 picks = picks.sort_values(sort_col, ascending=False)
             picks = picks.head(args.top_n).copy()
             picks["weight"] *= gross / float(picks["weight"].sum())
-            print(f"--top-n {args.top_n}: kept top {args.top_n} by "
-                  f"{sort_col or 'file order'}, weights rescaled to preserve "
-                  f"gross {gross:.3f}")
+            if not args.dump_tickers:
+                print(f"--top-n {args.top_n}: kept top {args.top_n} by "
+                      f"{sort_col or 'file order'}, weights rescaled to preserve "
+                      f"gross {gross:.3f}")
+    if args.dump_tickers:
+        print(",".join(picks["ticker"]))
+        return
     print(f"Picks: {picks_path}  ({len(picks)} names, "
           f"weights sum to {picks['weight'].sum():.3f})")
     if args.leverage != 1.0:
@@ -395,6 +669,10 @@ def main() -> None:
                   f"(CSV weights sum {weight_sum:.3f} renormalized to 1.0 first)")
             sizing_leverage = exposure / weight_sum
             gross_target = exposure
+
+    if args.broker == "web":
+        run_web(args, picks, picks_path, sizing_leverage, gross_target)
+        return
 
     host = args.host or resolve_windows_host()
     print(f"Connecting to {host}:{args.port} (clientId={args.client_id}) ...")
