@@ -1,21 +1,21 @@
 {
-  "generated": "2026-07-23 14:54:06.792581",
+  "generated": "2026-08-29 21:32:40.701326",
   "top_n": 40,
   "ic": {
-    "daily_ic_mean": 0.01629054503868326,
-    "monthly_ic_mean": 0.016799358852882175,
-    "monthly_ic_tstat": 1.0573596952630386,
-    "pct_months_positive": 0.5454545454545454,
-    "n_months": 66,
+    "daily_ic_mean": 0.017057801247906065,
+    "monthly_ic_mean": 0.01799681679103863,
+    "monthly_ic_tstat": 1.1472313981356446,
+    "pct_months_positive": 0.5671641791044776,
+    "n_months": 67,
     "best_month": {
       "month": "2025-04",
-      "ic": 0.31307709985653426
+      "ic": 0.31294633320813936
     },
     "worst_month": {
       "month": "2025-03",
-      "ic": -0.2821183503691858
+      "ic": -0.28497578745058183
     },
-    "monthly_ic_mean_excl_top3": 0.00441679289761262
+    "monthly_ic_mean_excl_top3": 0.00588855602453256
   },
   "underwater": {
     "raw_long_only": {
@@ -32,20 +32,20 @@
     }
   },
   "concentration": {
-    "n_rebalances": 66,
-    "unique_tickers": 296,
-    "avg_consecutive_overlap": 0.5461538461538462,
+    "n_rebalances": 67,
+    "unique_tickers": 298,
+    "avg_consecutive_overlap": 0.5583333333333333,
     "top_sector": "Information Technology",
-    "top_sector_avg_weight": 0.3068181818181818
+    "top_sector_avg_weight": 0.3026119402985075
   },
   "hit_rate": {
-    "avg_hit_rate": 0.5162878787878787,
-    "pct_rebalances_beat_spy": 0.5303030303030303,
-    "n_rebalances": 66
+    "avg_hit_rate": 0.5167910447761193,
+    "pct_rebalances_beat_spy": 0.5671641791044776,
+    "n_rebalances": 67
   },
   "live": {
-    "n_windows": 14,
-    "n_matured": 8,
-    "avg_active_ret_matured": 0.015956879484092704
+    "n_windows": 15,
+    "n_matured": 14,
+    "avg_active_ret_matured": 0.0036113213824851137
   }
 }
