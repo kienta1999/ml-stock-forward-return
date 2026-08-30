@@ -8,7 +8,7 @@ description: Rebalance the IBKR account toward the latest picks CSV through the 
 Does exactly what this used to do:
 
 ```
-uv run python scripts/execute_picks.py --port 4001 --mode live --leverage 1.35 --vol-target 0.2 --top-n 20
+uv run python scripts/execute_picks.py --port 4001 --mode live --leverage 1.35 --vol-target 0.2 --top-n 40
 ```
 
 …but with no IB Gateway and no IBKR Pro market-data subscription. The account
@@ -19,7 +19,7 @@ code, run as `--broker web`.
 
 **Default = real execution** of that command against account `U26645119`
 (LIVE, real money) using the newest `picks/picks_*.csv`. Any flag the user
-names — `--mode whatif`, `--top-n 40`, a specific picks file, a different
+names — `--mode whatif`, `--top-n 20`, a specific picks file, a different
 `--leverage` — overrides that default and is passed straight through.
 
 ## Non-negotiables
@@ -50,8 +50,12 @@ Defaults, unless the user said otherwise:
 | mode | `live` |
 | leverage | `1.35` |
 | vol-target | `0.2` |
-| top-n | `20` |
+| top-n | `40` |
 | account | `U26645119` |
+
+`--top-n 40` is the backtest canonical. 20 backtests better and halves fixed
+order costs, but is UNVERIFIED in the leave-2008-out stress test — so it is an
+explicit ask, never the default.
 
 Call the flags `$FLAGS` below:
 `--broker web --mode <mode> --leverage <lev> --vol-target <vt> --top-n <n> [--picks <file>]`

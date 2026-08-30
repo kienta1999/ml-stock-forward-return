@@ -217,9 +217,9 @@ uv run python scripts/execute_picks.py --port 4001 --mode live --leverage 1.35 -
 # by Playwright: positions, NetLiquidation, quotes and order tickets all come from the logged-in
 # portal session. Same sizing code (--broker web), same circuit breaker, no IB Gateway.
 # In Claude Code:
-#   /ibkr-web-trade                       # = the --mode live line above, on the newest picks CSV
+#   /ibkr-web-trade                       # newest picks CSV, --top-n 40 (backtest canonical)
 #   /ibkr-web-trade mode whatif           # commission/margin preview, places nothing
-#   /ibkr-web-trade top-n 40              # any flag above overrides the default
+#   /ibkr-web-trade top-n 20              # any flag above overrides the default
 # You log in yourself (2FA included) in the browser it opens; it confirms the plan with you,
 # then the final order list, before anything is submitted.
 ```
