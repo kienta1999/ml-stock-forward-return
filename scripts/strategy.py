@@ -51,10 +51,14 @@ DEFAULT_VOL_TARGET = 0.20
 VOL_LOOKBACK = 20
 
 # Annual margin interest rate charged on borrowed funds (gross exposure > 1.0).
-# IBKR Pro USD Tier I (< $100k borrowed) = 5.14% APR as of 2026-06-15. Used by
-# the backtest --leverage path and execute_picks.py to cost leverage honestly:
-# leverage is not free, and on a small account the borrow drag is material.
-DEFAULT_MARGIN_RATE = 0.0514
+# IBKR Lite USD = 6.13% APR (BM + 2.5%, flat across all tiers), confirmed against
+# the published rate table 2026-09-01. The live account U26645119 is Lite: fills
+# route ZERO/DARK at $0 commission, which Pro's $1.00-minimum never does. Pro
+# Tier I would be 5.13% (BM + 1.5%) — 1pp cheaper, but that is not the account
+# we trade. Used by the backtest --leverage path and execute_picks.py to cost
+# leverage honestly: leverage is not free, and on a small account the borrow
+# drag is material.
+DEFAULT_MARGIN_RATE = 0.0613
 
 # Live-account gross-exposure cap — the leverage leg of the 2026-07-08
 # rebalance-cadence decision (quarterly @ 1.35x, vol-target 0.20).

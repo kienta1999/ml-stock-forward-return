@@ -1,10 +1,10 @@
 {
-  "executed_at": "2026-07-06",
+  "executed_at": "2026-09-01T10:21:59",
   "account": "U26645119",
-  "picks": "picks/picks_2026-07-02.csv",
-  "equity": 30000.0,
+  "picks": "picks/picks_2026-08-31.csv",
+  "equity": 44379.46,
   "leverage": 1.35,
   "vol_target": 0.2,
-  "gross_exposure": 1.0688,
-  "note": "Reconstructed after the fact: go-live rebalance predates execute_picks.py writing this file. gross_exposure = min(1.35, 0.20 / spy_vol_20d@2026-07-06=0.1871) recomputed from the SPY cache. Future --mode live runs overwrite this with exact values."
+  "gross_exposure": 1.35,
+  "venue": "client-portal-web"
 }

@@ -24,7 +24,7 @@ Sizing:
     target_$[ticker] = weight * NetLiquidation * leverage
     Picks `weight` already bakes in the vol-target exposure (sums to <= 1.0),
     so with --leverage 1.0 (default) the book is cash-only and pays no margin
-    interest. --leverage > 1.0 borrows and is flagged loudly (IBKR Pro ~5.14%).
+    interest. --leverage > 1.0 borrows and is flagged loudly (IBKR Lite ~6.13%).
 
     --vol-target X makes leveraged sizing match the backtest overlay: gross
     exposure becomes min(leverage, X / spy_vol_20d) using the freshest cached
@@ -647,7 +647,7 @@ def main() -> None:
                          "live = actually place orders.")
     ap.add_argument("--leverage", type=float, default=1.0,
                     help="Gross exposure multiplier (default 1.0 = cash-only, "
-                         "no margin). >1.0 borrows at IBKR Pro ~5.14%% APR.")
+                         "no margin). >1.0 borrows at IBKR Lite ~6.13%% APR.")
     ap.add_argument("--vol-target", type=float, default=None,
                     nargs="?", const=0.20,
                     help="Backtest-matching overlay: gross exposure = "
@@ -722,7 +722,7 @@ def main() -> None:
           f"weights sum to {picks['weight'].sum():.3f})")
     if args.leverage != 1.0:
         print(f"⚠  leverage {args.leverage:.2f}x — this BORROWS on margin "
-              f"(~5.14% APR). Cash-only is --leverage 1.0.")
+              f"(~6.13% APR). Cash-only is --leverage 1.0.")
 
     # Sizing: build_plan multiplies CSV weights by `sizing_leverage`;
     # `gross_target` (× equity) is the intended gross book, used for the

@@ -25,7 +25,10 @@ names — `--mode whatif`, `--top-n 20`, a specific picks file, a different
 ## Non-negotiables
 
 1. **Never submit an order without the user's explicit go-ahead in chat.**
-   Two gates, both required: the plan, then the final confirmation.
+   Exactly two gates, both required, whatever the order count: the plan
+   (step 6), then the final confirmation (step 7b). Never ask per order —
+   40 orders still means two questions, not 41. `place_orders.js` already
+   auto-replies to IBKR's own per-order confirmation prompts.
 2. The user types their own username/password. Never ask for them, never store
    them, never type into the login form.
 3. In live mode, cancel working orders **before** reading positions. A stale
@@ -157,10 +160,37 @@ Stamps `reports/live_book.json` with the intended gross exposure —
 
 ### 9. Report
 
-Working vs. filled orders (the `book` list returned by 7c), anything rejected,
-anything skipped for a missing quote. Market closed → limits sit as DAY orders
-and expire unfilled if never touched; say so, and note that re-running the
-skill reconciles whatever did not fill.
+Read `final_report.js`, replace `__ACCOUNT__`, run it with `browser_evaluate`
+using `filename: "web_final.json"`, then:
+
+```bash
+mv web_final.json reports/web_final.json
+python3 - <<'EOF'
+import json
+a = json.load(open('reports/web_final.json'))
+b = json.load(open('reports/live_book.json'))          # pre-trade equity + target
+before, after = b['equity'], a['netliq']
+tgt, act = b['gross_exposure'], a['gross'] / a['netliq']
+print(f"NetLiq before   ${before:>12,.2f}")
+print(f"NetLiq after    ${after:>12,.2f}   ({after-before:+,.2f})")
+print(f"Gross exposure  ${a['gross']:>12,.2f}   {act:.3f}x  (target {tgt:.2f}x, "
+      f"shortfall {(tgt-act)*before:+,.0f})")
+print(f"Margin loan     ${a['loan']:>12,.2f}   {a['loan']/after*100:.1f}% of equity")
+print(f"Positions {a['positions']}   day P&L {a['day_pnl']}   "
+      f"excess liquidity ${a['excess_liquidity']:,.0f}")
+print("unfilled:", a['unfilled'] or "none")
+EOF
+```
+
+**Always show the user that block**, plus: working vs. filled orders (the `book`
+list from 7c), anything rejected, anything skipped for a missing quote.
+
+Actual gross almost always lands *under* target — whole-share rounding on a
+small account, worst on high-priced names. Report the realized multiple, never
+the target, as "your leverage".
+
+Market closed → limits sit as DAY orders and expire unfilled if never touched;
+say so, and note that re-running the skill reconciles whatever did not fill.
 
 ## Notes
 

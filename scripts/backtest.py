@@ -30,7 +30,7 @@ Leverage (--leverage, default 1.0 = cash-only):
     becomes min(leverage, vol_target/spy_vol) — you lever up in calm regimes
     but the vol target still de-risks you in stress. In the raw variant it is
     a flat `leverage`× gross. Borrowed funds (gross exposure > 1.0) are charged
-    margin interest daily at --margin-rate (default 5.14% APR, IBKR Pro Tier I)
+    margin interest daily at --margin-rate (default 6.13% APR, IBKR Lite USD)
     so the reported CAGR nets out the cost of leverage.
 
 Costs: 5 bps per side on rebalance turnover; margin interest on any borrow.
