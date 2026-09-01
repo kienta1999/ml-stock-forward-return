@@ -185,6 +185,7 @@ uv run python scripts/backtest.py --no-quality-filter # disable the cataclysmic-
 uv run python scripts/backtest.py --top-n 25         # tighter pick (default 40)
 uv run python scripts/backtest.py --vol-target 0.15  # more aggressive de-risk (default 0.20)
 uv run python scripts/backtest.py --weight pred      # weight basket by predicted_return (default: equal); see "Basket weighting" below
+uv run python scripts/backtest.py --sector-cap 0.40   # cap any one GICS sector at 40% of the basket (default: no cap) — see "Sector cap" below
 uv run python scripts/backtest.py --leverage 1.35     # lever up (default 1.0 = cash-only); borrow charged at 5.14% APR — see "Vol-target overlay"
 uv run python scripts/backtest.py --lag 1             # execute at the close 1 trading day AFTER the signal close — models the live loop (picks computed after close, orders placed next session). Measured 2026-07-05 on the same panel: raw CAGR 28.20% → 28.02%, vol-target 25.40% → 25.14%, Sharpe unchanged. 1-day execution lag costs ~0.2 CAGR pt — the MOC assumption is not load-bearing.
 
@@ -203,6 +204,12 @@ uv run python scripts/run_all.py --retrain        # also: train + backtest (use 
 uv run python scripts/run_all.py --full           # alias for --retrain (universe refreshes on every run)
 uv run python scripts/run_all.py --download-only  # raw-data refresh only — useful if you want to defer features/labels/picks
 uv run python scripts/run_all.py --dry-run        # print plan, don't execute
+# run_all.py passes --sector-cap 0.40 (strategy.LIVE_SECTOR_CAP) to today.py on every run,
+# so the picks CSV it writes is already sector-capped. The echoed command in cron.log shows it.
+
+# ── Backfill / re-run the backtest at the live config ──
+uv run python scripts/backtest.py --leverage 1.35 --vol-target 0.2 --sector-cap 0.40   # 📊 the live config, end to end
+uv run python scripts/backtest.py                                                      # canonical 1.0x, no cap — what reports/ holds
 
 # ── Live execution on Interactive Brokers — see "Live execution (IBKR)" below ──
 # --port is REQUIRED (4001 = live account, 4002 = paper). Examples use 4001 (always-live setup).
@@ -210,7 +217,7 @@ uv run python scripts/check_ibkr_conn.py --port 4001                 # sanity-ch
 uv run python scripts/execute_picks.py --port 4001                   # print rebalance plan only — places NOTHING (safe)
 uv run python scripts/execute_picks.py --port 4001 --mode whatif --leverage 1.35 --vol-target 0.2 --top-n 20 --max-notional 10000  # IBKR commission/margin preview — still places nothing
 uv run python scripts/execute_picks.py --port 4001 --fractional      # deploy ~100% of a small account (fractional shares)
-uv run python scripts/execute_picks.py --port 4001 --mode live --leverage 1.35 --vol-target 0.2 --top-n 20  # ⚠️ places real orders (gated by cap + typed confirm)
+uv run python scripts/execute_picks.py --port 4001 --mode live --leverage 1.35 --vol-target 0.2  --sector-cap 0.40 --top-n 40  # ⚠️ places real orders (gated by cap + typed confirm)
 
 # ── Alternatively, with NO API at all (IBKR Lite, or just not paying for Pro market data) ──
 # The /ibkr-web-trade skill does the same rebalance through the free web Client Portal, driven
@@ -223,6 +230,58 @@ uv run python scripts/execute_picks.py --port 4001 --mode live --leverage 1.35 -
 # You log in yourself (2FA included) in the browser it opens; it confirms the plan with you,
 # then the final order list, before anything is submitted.
 ```
+
+### Sector cap (`--sector-cap`, added 2026-09-01)
+
+The model has no sector constraint: `gics_sector` is a *feature* it reads, not
+a *limit* on the basket. It used that freedom — the June 2026 baskets ran 65%
+Information Technology and 32% semiconductors, into a stretch where the S&P's
+semis fell ~8% per 21-day window. `--sector-cap` bounds it.
+
+Greedy fill down the prediction ranking, skipping sectors already at the cap.
+Swept over the test set (2021-01-04 → 2026-07-30) at **leverage 1.35 /
+vol-target 0.20 / top-40** — the live config:
+
+| Sector cap | CAGR | Sharpe | MaxDD | vs no cap |
+| ---------- | -----: | ---: | ------: | --- |
+| 0.50 | +27.26% | 0.96 | −29.19% | +0.32 CAGR, same DD |
+| **0.40 (live)** | **+27.14%** | **0.96** | **−28.94%** | better on all three |
+| _none_ | +26.94% | 0.95 | −29.19% | — |
+| 0.30 | +26.26% | 0.95 | −28.05% | −0.68 CAGR, −1.1 DD |
+| 0.25 | +25.33% | 0.93 | −27.44% | −1.61 CAGR |
+| 0.20 | +23.59% | 0.89 | −26.86% | −3.35 CAGR |
+| 0.15 | +21.85% | 0.86 | −25.35% | −5.09 CAGR |
+
+At 1.0x the shape is identical (no cap 0.96 Sharpe, 0.30 → 0.97, 0.15 → 0.89).
+
+**Read this honestly.** The 0.40 rung's edge over no cap is 0.20 CAGR points,
+while the rebalance-offset band for that same config spans +22.55% to +31.12%.
+The margin is deep inside the noise. What survives the noise is the *shape*:
+every rung from 0.50 down to 0.30 is neutral-to-better, and everything tighter
+costs real return. So 0.40 is defensible as **a free 40% ceiling on any one
+sector**, not as measured alpha.
+
+A tighter cap was the obvious fix after the June drawdown — the basket was 45%
+semis, so 0.20 is what would actually have prevented it. 0.20 costs 3.35 CAGR
+points and 0.06 Sharpe across the full window. That hypothesis was built after
+seeing which sector fell, and it did not survive being tested outside the
+window that suggested it.
+
+**Caveats.**
+- `--sector-cap` bounds a GICS **Sector** (`Information Technology`), not a
+  sub-industry. A 0.40 cap still permits all 16 IT slots to be semiconductors.
+  Capping semis specifically needs `GICS Sub-Industry`, which exists only in
+  `data/universe/sp500_sectors.csv` as a *current* snapshot — using it in a
+  backtest would import classification lookahead.
+- 7.4% of test-period rows carry `gics_sector = "Unknown"` (delisted/older
+  names). They share one pseudo-sector and are capped together, which biases
+  the sweep slightly **against** the cap. It is 0% of today's universe.
+
+**Where it is wired:** `run_all.py` passes `--sector-cap 0.40`
+(`strategy.LIVE_SECTOR_CAP`) to `today.py`, so the picks CSV is capped at
+generation, and the `/ibkr-web-trade` skill passes it too. `backtest.py`,
+`today.py` and `execute_picks.py` all default to **no cap** — every number
+published before 2026-09-01 stays reproducible.
 
 > **On IBKR Lite / no market-data subscription?** `.claude/skills/ibkr-web-trade`
 > is the API-free path: `/ibkr-web-trade` in Claude Code opens the web Client
@@ -452,16 +511,17 @@ uv run python scripts/execute_picks.py --port 4001 --leverage 1.35 --vol-target 
 
 Key flags:
 
-| Flag             | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `--mode`         | `print` (default, safe) · `whatif` (cost preview) · `live` (places orders)                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Flag             | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--mode`         | `print` (default, safe) · `whatif` (cost preview) · `live` (places orders)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `--sector-cap`   | Max share of the basket from any one GICS sector (`0.40` = 40%). Default **None** = trade the CSV as written. `run_all.py` already caps at 0.40 when it writes the picks file, so this is for re-capping an older or hand-made CSV at trade time (no-op on an already-capped file). Sector source: the CSV's `gics_sector` column, else `data/universe/sp500_sectors.csv` — a **current** snapshot, correct for sizing a trade today, never for scoring history. Gross exposure is preserved: survivors are rescaled. |
 | `--top-n`        | Trade only the top N picks by `predicted_return`, weights rescaled to preserve the CSV's gross exposure (composes with `--vol-target`). **40 = backtest canonical and 2008-stress-tested; 20 backtests better (raw CAGR 34.5% vs 28.2%, Sharpe within noise) and halves fixed order costs. 20 is now leave-2008-out verified (2026-07-23): it SURVIVES (stays positive, beats SPY) but is the more fragile basket — deeper crash MaxDD and its offset-luck range goes negative where 40's stays positive (see "Basket size in the 2008 stress test" below). It also holds ~70% tech vs 65% at 40.** **Live choice: 20** — better return + cleaner sizing at low capital, and 2008-survivable; the extra tail robustness of 40 is a minor (~3-4 pt) drawdown effect vs leverage, which is the real tail lever. |
-| `--fractional`   | Fractional-share orders so a small account deploys ~100% instead of stranding cash on pricey names that round to 0 whole shares. ⚠️ **IBKR frequently rejects fractional over the API** (error 10243/10244 — needs the fractional-shares permission enabled, and may be desktop-TWS-only). Verify with `--mode whatif` first. RTH only.                                                                                                                                        |
-| `--leverage`     | Gross exposure multiplier (default 1.0 = cash-only). >1.0 borrows on margin (~5.14% APR).                                                                                                                                                                                                                                                                                                                                                                                      |
-| `--vol-target`   | Backtest-matching overlay for leveraged sizing: gross = `min(leverage, X / spy_vol_20d)` from the freshest cached SPY data, CSV weights renormalized to 1.0 first. Bare flag = 0.20 (the backtest default); values ≤ 0 or > 1 rejected (percent typo guard). Omit → flat leverage multiple (more exposure in stress than the backtest models).                                                                                                                                 |
-| `--max-notional` | Hard circuit breaker on total BUY notional; abort if the plan exceeds it.                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `--min-order`    | Skip rebalances below this dollar value (default $100) to avoid churn.                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `--slippage-bps` | Marketable-limit padding per side (default 50 bps; sizing prices are 15-min delayed, and 30 bps missed 3/20 fills on the 2026-07-06 go-live).                                                                                                                                                                                                                                                                                                                                  |
+| `--fractional`   | Fractional-share orders so a small account deploys ~100% instead of stranding cash on pricey names that round to 0 whole shares. ⚠️ **IBKR frequently rejects fractional over the API** (error 10243/10244 — needs the fractional-shares permission enabled, and may be desktop-TWS-only). Verify with `--mode whatif` first. RTH only.                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `--leverage`     | Gross exposure multiplier (default 1.0 = cash-only). >1.0 borrows on margin (~5.14% APR).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `--vol-target`   | Backtest-matching overlay for leveraged sizing: gross = `min(leverage, X / spy_vol_20d)` from the freshest cached SPY data, CSV weights renormalized to 1.0 first. Bare flag = 0.20 (the backtest default); values ≤ 0 or > 1 rejected (percent typo guard). Omit → flat leverage multiple (more exposure in stress than the backtest models).                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `--max-notional` | Hard circuit breaker on total BUY notional; abort if the plan exceeds it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `--min-order`    | Skip rebalances below this dollar value (default $100) to avoid churn.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `--slippage-bps` | Marketable-limit padding per side (default 50 bps; sizing prices are 15-min delayed, and 30 bps missed 3/20 fills on the 2026-07-06 go-live).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 **Live-mode safety:** orders are marketable **limit** orders with `tif`/limit
 set explicitly (dodges the Gateway order-preset that trips error 10349 on bare
@@ -898,13 +958,13 @@ Re-ran the leave-2008-out walk-forward for both basket sizes on the **same**
 2007-01→2009-12). Resolves the long-standing "top-20 UNVERIFIED in 2008" flag.
 All numbers **unlevered**:
 
-| Metric (2007-2009)      | top-20         | top-40        | SPY    |
-| ----------------------- | -------------- | ------------- | ------ |
-| vol-target CAGR         | +2.92%         | +5.01%        | -5.66% |
-| vol-target MaxDD        | -48.2%         | -44.6%        | -55.2% |
-| vol-target Sharpe       | 0.09           | 0.17          | -0.19  |
-| offset-luck CAGR range  | [-3.7%, +9.8%] | [+0.6%,+10.2%]| —      |
-| raw (no overlay) MaxDD  | -61.4%         | -58.0%        | —      |
+| Metric (2007-2009)     | top-20         | top-40         | SPY    |
+| ---------------------- | -------------- | -------------- | ------ |
+| vol-target CAGR        | +2.92%         | +5.01%         | -5.66% |
+| vol-target MaxDD       | -48.2%         | -44.6%         | -55.2% |
+| vol-target Sharpe      | 0.09           | 0.17           | -0.19  |
+| offset-luck CAGR range | [-3.7%, +9.8%] | [+0.6%,+10.2%] | —      |
+| raw (no overlay) MaxDD | -61.4%         | -58.0%         | —      |
 
 **Verdict:** top-20 SURVIVES 2008 out-of-sample (positive CAGR, beats SPY) —
 it does not detonate — but it is the more fragile basket on every risk axis:
@@ -913,12 +973,12 @@ deeper MaxDD (raw and gated), lower crash CAGR, and its offset-luck range dips
 across all 21 offsets. This is the concentration premium: same Sharpe in the
 calm 2021→ window, more tail fragility in a crash.
 
-**Two caveats before reading this as comfort:** (1) these are *unlevered* — at
+**Two caveats before reading this as comfort:** (1) these are _unlevered_ — at
 the live 1.35x, the -48%/-61% top-20 drawdowns scale past -50% (margin-call
 territory), so **basket size is a minor (~3-4 pt) tail lever vs leverage**,
 which is the dominant one. (2) The vol-target overlay averaged only **~83%**
 exposure through this window — 2008 was sustained high vol, not a single
-spike, so the overlay is *not* a full parachute in a grinding crash; the daily
+spike, so the overlay is _not_ a full parachute in a grinding crash; the daily
 `today.py` de-risk helps but can't defy a persistent-vol regime. (The
 leave-out model is also deliberately weak — val IC ~0.01 — so this is a
 structural stress test of basket size + overlay, not a P&L forecast.)
@@ -928,6 +988,7 @@ quarterly.** 20 wins on return + capital fit and is 2008-survivable; quarterly
 cadence is a coin-flip-gross tie with monthly that wins on costs/taxes (see
 "Rebalance cadence decision"). Tail risk is controlled with leverage + daily
 de-risk, not basket size.
+
 - **Empirical 2021-2026** (no real vol-bomb in this window): vol-target's
   average exposure stayed ~95% — overlay barely activated because the 2022
   bear was a slow grind, not a vol explosion. MaxDD improved ~2pts vs raw

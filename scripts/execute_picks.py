@@ -539,10 +539,78 @@ def record_book() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _apply_sector_cap(
+    picks: pd.DataFrame, cap: float, quiet: bool = False
+) -> pd.DataFrame:
+    """Drop names so no GICS sector exceeds `cap` of the basket.
+
+    Mirrors strategy.top_picks: greedy down the predicted_return ranking,
+    skipping sectors already full. Gross exposure is preserved by rescaling
+    the survivors, so a capped basket deploys the same dollars as an uncapped
+    one — it just spreads them differently.
+
+    Sector source: the CSV's own gics_sector column (written by today.py), else
+    data/universe/sp500_sectors.csv. That file is a CURRENT snapshot, not
+    point-in-time — correct for sizing a trade today, never use it to score
+    history.
+    """
+    if "gics_sector" in picks.columns:
+        sectors = picks["gics_sector"]
+    else:
+        ref = os.path.join(_ROOT, "data", "universe", "sp500_sectors.csv")
+        if not os.path.exists(ref):
+            sys.exit(f"--sector-cap needs sector data: {picks.columns.tolist()} "
+                     f"has no gics_sector column and {ref} is missing.")
+        lookup = pd.read_csv(ref).set_index("Ticker")["GICS Sector"]
+        sectors = picks["ticker"].map(lookup)
+
+    sectors = sectors.fillna("Unknown")
+    missing = int((sectors == "Unknown").sum())
+    if missing and not quiet:
+        print(f"⚠  --sector-cap: {missing} name(s) have no sector; they share "
+              f"one 'Unknown' bucket and are capped together.")
+
+    n = len(picks)
+    max_per_sector = max(1, int(cap * n))
+    order = (picks.sort_values("predicted_return", ascending=False).index
+             if "predicted_return" in picks.columns else picks.index)
+    counts: dict[str, int] = {}
+    keep: list = []
+    for idx in order:
+        sec = sectors.loc[idx]
+        if counts.get(sec, 0) >= max_per_sector:
+            continue
+        counts[sec] = counts.get(sec, 0) + 1
+        keep.append(idx)
+
+    if len(keep) == n:
+        return picks
+    gross = float(picks["weight"].sum())
+    out = picks.loc[keep].copy()
+    out["weight"] *= gross / float(out["weight"].sum())
+    if not quiet:
+        top_sec = max(counts, key=counts.get)
+        print(f"--sector-cap {cap:.2f}: dropped {n - len(keep)} of {n} names "
+              f"(max {max_per_sector}/sector), weights rescaled to preserve "
+              f"gross {gross:.3f}. Largest sector now {top_sec} "
+              f"{counts[top_sec]}/{len(keep)}.")
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--picks", default=None,
                     help="Picks CSV. Default: latest picks/picks_*.csv.")
+    ap.add_argument("--sector-cap", type=float, default=None,
+                    help="Max share of the basket from any one GICS sector "
+                         "(0.40 = 40%%). Default None = trade the CSV as "
+                         "written. run_all.py already caps at 0.40 (see "
+                         "strategy.LIVE_SECTOR_CAP) when it generates picks, "
+                         "so this is for capping an older or hand-made picks "
+                         "file at trade time. Sectors come from the CSV's "
+                         "gics_sector column, else data/universe/"
+                         "sp500_sectors.csv (a CURRENT snapshot — fine live, "
+                         "wrong for backtests).")
     ap.add_argument("--top-n", type=int, default=None,
                     help="Trade only the top N picks by predicted_return, "
                          "weights rescaled to preserve the CSV's gross exposure. "
@@ -622,6 +690,12 @@ def main() -> None:
     picks_path = args.picks or latest_picks_file()
     picks = pd.read_csv(picks_path)
     picks = picks[picks["weight"] > 0]
+    if args.sector_cap is not None:
+        if not 0.0 < args.sector_cap <= 1.0:
+            sys.exit(f"--sector-cap {args.sector_cap} must be a fraction in "
+                     f"(0, 1]. 0.40 = 40% of the basket.")
+        picks = _apply_sector_cap(picks, args.sector_cap,
+                                  quiet=args.dump_tickers)
     if args.top_n is not None:
         if args.top_n < 1:
             sys.exit(f"--top-n {args.top_n} must be >= 1.")

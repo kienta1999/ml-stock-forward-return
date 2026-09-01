@@ -119,6 +119,7 @@ def run_one_offset(
     leverage: float,
     margin_rate: float,
     lag: int = 0,
+    sector_cap: float | None = None,
 ) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
     """Single backtest with rebalances on day `offset`, `offset+hold_days`, ....
 
@@ -182,7 +183,7 @@ def run_one_offset(
                 day = by_date[signal_date]
                 if quality_filter_on:
                     day = strategy.apply_quality_filter(day)
-                top = strategy.top_picks(day, top_n)
+                top = strategy.top_picks(day, top_n, sector_cap=sector_cap)
                 pick_weights = strategy.compute_weights(top, weight_mode)
                 new_weights = {t: w * exposure for t, w in pick_weights.items()}
             else:
@@ -223,6 +224,7 @@ def run_shifted_starts(
     leverage: float,
     margin_rate: float,
     lag: int = 0,
+    sector_cap: float | None = None,
 ) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series]:
     """Run `hold_days` backtests at different rebalance offsets.
 
@@ -242,6 +244,8 @@ def run_shifted_starts(
         if c in test_panel.columns
     ]
     keep_cols = ["ticker", "ret_1d", "predicted_return"] + quality_cols
+    if "gics_sector" in test_panel.columns:
+        keep_cols = keep_cols + ["gics_sector"]
     by_date = {d: g[keep_cols] for d, g in test_panel.groupby("date")}
 
     curves: dict[int, pd.Series] = {}
@@ -251,6 +255,7 @@ def run_shifted_starts(
     for offset in range(hold_days):
         eq, inm, hold, exp = run_one_offset(
             by_date, market, test_dates, offset,
+            sector_cap=sector_cap,
             vol_target_on=vol_target_on, top_n=top_n, hold_days=hold_days,
             cost_per_side=cost_per_side, vol_target=vol_target,
             weight_mode=weight_mode,
@@ -422,6 +427,15 @@ def main() -> None:
             "falls back to equal if all picks are ≤0)."
         ),
     )
+    ap.add_argument(
+        "--sector-cap", type=float, default=None,
+        help=(
+            "Max share of the basket from any one GICS sector (e.g. 0.20 = "
+            "20%%). Default None = unconstrained, matching every result "
+            "published before 2026-09-01. Picks are filled greedily down the "
+            "prediction ranking, skipping sectors already at the cap."
+        ),
+    )
     ap.add_argument("--model", default=MODEL_PATH)
     args = ap.parse_args()
 
@@ -455,6 +469,7 @@ def main() -> None:
             weight_mode=args.weight,
             quality_filter_on=quality_filter_on,
             leverage=args.leverage, margin_rate=args.margin_rate, lag=args.lag,
+            sector_cap=args.sector_cap,
         )
 
     print(f"Running long-only RAW / no overlay ({args.hold_days} offsets, "
@@ -466,6 +481,7 @@ def main() -> None:
         weight_mode=args.weight,
         quality_filter_on=quality_filter_on,
         leverage=args.leverage, margin_rate=args.margin_rate, lag=args.lag,
+        sector_cap=args.sector_cap,
     )
 
     test_start = pd.Timestamp(test_panel["date"].min())

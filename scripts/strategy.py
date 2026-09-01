@@ -62,6 +62,16 @@ DEFAULT_MARGIN_RATE = 0.0514
 # the worst-case book assumption when reports/live_book.json is absent.
 LIVE_LEVERAGE = 1.35
 
+# Live basket sector cap — max share of the basket from any one GICS sector.
+# Chosen 2026-09-01 from a sweep at leverage 1.35 / vol-target 0.20 over the
+# 2021-2026 test set: 0.40 weakly dominates no cap (CAGR +27.14% vs +26.94%,
+# Sharpe 0.96 vs 0.95, MaxDD -28.94% vs -29.19%), while tighter caps cost real
+# return (0.20 → +23.59% / 0.89). The differences at 0.40 are inside the
+# rebalance-offset noise band, so the case for it is "a free 40% ceiling on any
+# one sector", not measured alpha. Wired into run_all.py and the
+# ibkr-web-trade skill; every script still defaults to no cap.
+LIVE_SECTOR_CAP = 0.40
+
 # De-risk alarm threshold: fire when today's formula exposure drops more
 # than this fraction below the book's exposure (relative, not points).
 # 10% ignores day-to-day vol wiggle but fires on a real regime shift.
@@ -197,9 +207,38 @@ def vol_target_exposure(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def top_picks(day_panel: pd.DataFrame, top_n: int = TOP_N) -> pd.DataFrame:
-    """Top-N rows by predicted_return on a single date's slice."""
-    return day_panel.nlargest(top_n, "predicted_return")
+def top_picks(
+    day_panel: pd.DataFrame,
+    top_n: int = TOP_N,
+    sector_cap: float | None = None,
+) -> pd.DataFrame:
+    """Top-N rows by predicted_return on a single date's slice.
+
+    `sector_cap` bounds any one GICS sector's share of the basket (0.20 = at
+    most 20% of the names). None (default) = unconstrained, the historical
+    behaviour: the model is free to put 45% of the basket in one sector, which
+    is what it did into the June 2026 semiconductor drawdown.
+
+    Greedy fill down the predicted-return ranking, skipping names whose sector
+    is already full. If the cap makes top_n unreachable on a thin day the
+    basket comes back short rather than breaching the cap; compute_weights
+    renormalises over whatever survives.
+    """
+    if sector_cap is None or "gics_sector" not in day_panel.columns:
+        return day_panel.nlargest(top_n, "predicted_return")
+
+    max_per_sector = max(1, int(sector_cap * top_n))
+    ranked = day_panel.sort_values("predicted_return", ascending=False)
+    counts: dict[str, int] = {}
+    keep: list = []
+    for idx, sec in zip(ranked.index, ranked["gics_sector"].fillna("__unknown__")):
+        if counts.get(sec, 0) >= max_per_sector:
+            continue
+        counts[sec] = counts.get(sec, 0) + 1
+        keep.append(idx)
+        if len(keep) == top_n:
+            break
+    return ranked.loc[keep]
 
 
 def compute_weights(

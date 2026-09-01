@@ -212,6 +212,16 @@ def main() -> None:
         ),
     )
     ap.add_argument(
+        "--sector-cap", type=float, default=None,
+        help=(
+            "Max share of the basket from any one GICS sector (0.40 = 40%%). "
+            "Default None = unconstrained. run_all.py passes "
+            f"{strategy.LIVE_SECTOR_CAP} — the live config; pass it here too "
+            "when calling today.py directly, or the basket you generate will "
+            "not match the one the monthly pipeline produces."
+        ),
+    )
+    ap.add_argument(
         "--diff",
         help="Path to a previous picks CSV to compute BUY/SELL/HOLD list against.",
     )
@@ -314,7 +324,9 @@ def main() -> None:
         # Defensive: vol_target_exposure clamps at [0, 1] and only returns 0
         # when vol_target itself is 0. Treat as full cash.
         print("\n=== STAY IN CASH (exposure = 0) ===")
-        picks_df = pd.DataFrame(columns=["ticker", "predicted_return", "weight"])
+        picks_df = pd.DataFrame(
+            columns=["ticker", "predicted_return", "gics_sector", "weight"]
+        )
     else:
         candidates = today
         if not args.no_quality_filter:
@@ -325,9 +337,12 @@ def main() -> None:
                 f"\nQuality filter: dropped {dropped} of {before} candidates "
                 f"({dropped / before * 100:.1f}%) on fundamentals/insider thresholds."
             )
-        top = strategy.top_picks(candidates, args.top_n)[
-            ["ticker", "predicted_return"]
-        ].copy().reset_index(drop=True)
+        out_cols = ["ticker", "predicted_return"]
+        if "gics_sector" in candidates.columns:
+            out_cols.append("gics_sector")
+        top = strategy.top_picks(
+            candidates, args.top_n, sector_cap=args.sector_cap
+        )[out_cols].copy().reset_index(drop=True)
         pick_weights = strategy.compute_weights(top, args.weight)
         # Scale every basket weight by the recommended exposure; the
         # implicit (1 - exposure) is cash. CSV reflects the actual

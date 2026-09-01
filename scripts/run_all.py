@@ -37,6 +37,10 @@ from glob import glob
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
+
+sys.path.insert(0, _HERE)
+import strategy  # noqa: E402  (needs _HERE on the path first)
+
 PICKS_DIR = os.path.join(_ROOT, "picks")
 
 # Resolve `uv` to an absolute path. When launched from ~/.bashrc on shell
@@ -168,7 +172,14 @@ def main() -> int:
         steps.append(("Backtest", py + ["scripts/backtest.py"]))
 
     if not args.no_today:
-        today_cmd = py + ["scripts/today.py"]
+        # The live basket config. Passed explicitly rather than defaulted
+        # inside today.py so the sector cap shows up in the echoed command
+        # and in cron.log — a silent default is how you end up unable to tell
+        # which constraint produced a given picks file.
+        today_cmd = py + [
+            "scripts/today.py",
+            "--sector-cap", str(strategy.LIVE_SECTOR_CAP),
+        ]
         if not args.no_diff:
             prev = _pre_today_picks_file()
             if prev:

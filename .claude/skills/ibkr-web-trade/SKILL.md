@@ -8,7 +8,7 @@ description: Rebalance the IBKR account toward the latest picks CSV through the 
 Does exactly what this used to do:
 
 ```
-uv run python scripts/execute_picks.py --port 4001 --mode live --leverage 1.35 --vol-target 0.2 --top-n 40
+uv run python scripts/execute_picks.py --port 4001 --mode live --leverage 1.35 --vol-target 0.2 --sector-cap 0.40 --top-n 40
 ```
 
 …but with no IB Gateway and no IBKR Pro market-data subscription. The account
@@ -50,15 +50,25 @@ Defaults, unless the user said otherwise:
 | mode | `live` |
 | leverage | `1.35` |
 | vol-target | `0.2` |
+| sector-cap | `0.40` |
 | top-n | `40` |
 | account | `U26645119` |
+
+`--sector-cap 0.40` caps any one GICS sector at 40% of the basket. Swept
+2026-09-01 at leverage 1.35 / vol-target 0.20 over 2021–2026: 0.40 weakly
+dominates no cap (CAGR +27.14% vs +26.94%, Sharpe 0.96 vs 0.95, MaxDD
+−28.94% vs −29.19%), while 0.20 costs 3.3 CAGR points. The margin at 0.40 is
+inside the rebalance-offset noise band, so treat it as a free sector ceiling
+rather than measured alpha. `run_all.py` already applies it when it writes
+the picks file; passing it here re-caps a picks file generated before
+2026-09-01, and is a no-op on a file that is already capped.
 
 `--top-n 40` is the backtest canonical. 20 backtests better and halves fixed
 order costs, but is UNVERIFIED in the leave-2008-out stress test — so it is an
 explicit ask, never the default.
 
 Call the flags `$FLAGS` below:
-`--broker web --mode <mode> --leverage <lev> --vol-target <vt> --top-n <n> [--picks <file>]`
+`--broker web --mode <mode> --leverage <lev> --vol-target <vt> --sector-cap <cap> --top-n <n> [--picks <file>]`
 
 ### 2. Open the portal and check the session
 
