@@ -1,10 +1,10 @@
 {
-  "generated": "2026-08-29 21:32:40.701326",
+  "generated": "2026-09-01 00:41:27.419003",
   "top_n": 40,
   "ic": {
-    "daily_ic_mean": 0.017057801247906065,
-    "monthly_ic_mean": 0.01799681679103863,
-    "monthly_ic_tstat": 1.1472313981356446,
+    "daily_ic_mean": 0.017002220407527694,
+    "monthly_ic_mean": 0.01789868571949667,
+    "monthly_ic_tstat": 1.1414084493693823,
     "pct_months_positive": 0.5671641791044776,
     "n_months": 67,
     "best_month": {
@@ -15,20 +15,20 @@
       "month": "2025-03",
       "ic": -0.28497578745058183
     },
-    "monthly_ic_mean_excl_top3": 0.00588855602453256
+    "monthly_ic_mean_excl_top3": 0.005785825059012076
   },
   "underwater": {
     "raw_long_only": {
-      "max_dd": -0.26824467035671695,
-      "current_dd": 0.0
+      "max_dd": -0.26993091100412725,
+      "current_dd": -0.08540872335036409
     },
     "gated_long_only": {
-      "max_dd": -0.2486393424021217,
-      "current_dd": 0.0
+      "max_dd": -0.2536536560354278,
+      "current_dd": -0.08487889053274822
     },
     "spy": {
       "max_dd": -0.24496403026291746,
-      "current_dd": -0.015081818535257918
+      "current_dd": -0.013922477788171572
     }
   },
   "concentration": {
@@ -44,7 +44,7 @@
     "n_rebalances": 67
   },
   "live": {
-    "n_windows": 15,
+    "n_windows": 16,
     "n_matured": 14,
     "avg_active_ret_matured": 0.0036113213824851137
   }
