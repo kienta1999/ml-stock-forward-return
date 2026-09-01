@@ -690,12 +690,9 @@ def main() -> None:
     picks_path = args.picks or latest_picks_file()
     picks = pd.read_csv(picks_path)
     picks = picks[picks["weight"] > 0]
-    if args.sector_cap is not None:
-        if not 0.0 < args.sector_cap <= 1.0:
-            sys.exit(f"--sector-cap {args.sector_cap} must be a fraction in "
-                     f"(0, 1]. 0.40 = 40% of the basket.")
-        picks = _apply_sector_cap(picks, args.sector_cap,
-                                  quiet=args.dump_tickers)
+    if args.sector_cap is not None and not 0.0 < args.sector_cap <= 1.0:
+        sys.exit(f"--sector-cap {args.sector_cap} must be a fraction in "
+                 f"(0, 1]. 0.40 = 40% of the basket.")
     if args.top_n is not None:
         if args.top_n < 1:
             sys.exit(f"--top-n {args.top_n} must be >= 1.")
@@ -711,6 +708,13 @@ def main() -> None:
                 print(f"--top-n {args.top_n}: kept top {args.top_n} by "
                       f"{sort_col or 'file order'}, weights rescaled to preserve "
                       f"gross {gross:.3f}")
+    # AFTER --top-n, not before: the cap has to bound the basket actually
+    # traded. Capping the 40-name CSV first is a no-op (run_all already
+    # capped it), and --top-n 20 would then slice an uncapped top-20 out of
+    # it — 0.40 of 20 is 8 per sector, not 16.
+    if args.sector_cap is not None:
+        picks = _apply_sector_cap(picks, args.sector_cap,
+                                  quiet=args.dump_tickers)
     if args.dump_tickers:
         print(",".join(picks["ticker"]))
         return

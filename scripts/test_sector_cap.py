@@ -93,6 +93,26 @@ def main() -> None:
     assert "JPM" in set(out["ticker"])
     assert abs(out["weight"].sum() - 1.0) < 1e-12
 
+    # 12. Ordering regression: the cap must bound what is actually TRADED.
+    #     A 40-name CSV already capped at 16/sector is a no-op at 0.40, so
+    #     applying the cap before --top-n 20 would leave the traded basket
+    #     uncapped. After the slice, 0.40 of 20 = 8 per sector.
+    csv40 = pd.DataFrame({
+        "ticker": [f"T{i}" for i in range(40)],
+        "predicted_return": [1.0 - i / 40 for i in range(40)],
+        # top 16 by rank are Tech: exactly at the cap for n=40, so a
+        # pre-slice cap changes nothing.
+        "gics_sector": ["Tech"] * 16 + ["Health"] * 12 + ["Fin"] * 12,
+        "weight": [0.025] * 40,
+    })
+    assert len(execute_picks._apply_sector_cap(csv40, 0.40, quiet=True)) == 40
+
+    traded = csv40.head(20).copy()          # what --top-n 20 leaves
+    assert (traded["gics_sector"] == "Tech").sum() == 16   # 80% — uncapped
+    out = execute_picks._apply_sector_cap(traded, 0.40, quiet=True)
+    assert (out["gics_sector"] == "Tech").sum() == 8, out["gics_sector"].tolist()
+    assert abs(out["weight"].sum() - traded["weight"].sum()) < 1e-12
+
     print("all sector-cap checks passed")
 
 
