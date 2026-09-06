@@ -358,13 +358,22 @@ def main() -> None:
             )
         _print_picks(picks_df, latest_date, args.top_n)
 
+    # Final step: the employer ticker is scored, ranked and printed above,
+    # but must not reach the CSV the executor trades from.
+    csv_df = strategy.drop_current_company(picks_df)
+    if len(csv_df) < len(picks_df):
+        print(
+            f"\n  {strategy.CURRENT_COMPANY} excluded from the CSV "
+            f"(employer restriction); its weight stays in cash."
+        )
+
     os.makedirs(PICKS_DIR, exist_ok=True)
     out_path = os.path.join(PICKS_DIR, f"picks_{today_str}.csv")
-    picks_df.to_csv(out_path, index=False)
+    csv_df.to_csv(out_path, index=False)
     print(f"\n  -> picks saved to {out_path}")
 
     if prev_picks is not None:
-        _print_diff(picks_df, prev_picks, os.path.basename(args.diff))
+        _print_diff(csv_df, prev_picks, os.path.basename(args.diff))
 
 
 if __name__ == "__main__":

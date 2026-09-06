@@ -76,6 +76,13 @@ LIVE_LEVERAGE = 1.35
 # ibkr-web-trade skill; every script still defaults to no cap.
 LIVE_SECTOR_CAP = 0.40
 
+# Employer restriction: ticker of the company the user works for, which
+# compliance bars from trading. Dropped from the picks CSV only — the model
+# still trains on it, scores it and it still counts against TOP_N and the
+# sector cap, so the basket matches the backtest and its weight simply sits
+# in cash. Set to None when it no longer applies (retirement, job change).
+CURRENT_COMPANY: str | None = "META"
+
 # De-risk alarm threshold: fire when today's formula exposure drops more
 # than this fraction below the book's exposure (relative, not points).
 # 10% ignores day-to-day vol wiggle but fires on a real regime shift.
@@ -243,6 +250,17 @@ def top_picks(
         if len(keep) == top_n:
             break
     return ranked.loc[keep]
+
+
+def drop_current_company(picks: pd.DataFrame) -> pd.DataFrame:
+    """Remove the employer ticker from a finished picks frame (CSV step only).
+
+    Weights are left untouched, so the dropped name's weight is cash rather
+    than being spread over names the model did not size that big.
+    """
+    if not CURRENT_COMPANY or picks.empty:
+        return picks
+    return picks[picks["ticker"] != CURRENT_COMPANY].reset_index(drop=True)
 
 
 def compute_weights(
