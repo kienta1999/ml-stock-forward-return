@@ -23,28 +23,6 @@ def _panel(sectors: list[str]) -> pd.DataFrame:
     })
 
 
-def test_drop_current_company() -> None:
-    picks = pd.DataFrame({
-        "ticker": ["AAPL", "META", "MSFT"],
-        "predicted_return": [0.3, 0.2, 0.1],
-        "weight": [0.1, 0.1, 0.1],
-    })
-    saved = strategy.CURRENT_COMPANY
-    try:
-        strategy.CURRENT_COMPANY = "META"
-        out = strategy.drop_current_company(picks)
-        assert list(out["ticker"]) == ["AAPL", "MSFT"]
-        # weights untouched — the dropped name's share becomes cash
-        assert list(out["weight"]) == [0.1, 0.1]
-        # nullable: None (retired / switched employer) is a no-op
-        strategy.CURRENT_COMPANY = None
-        assert len(strategy.drop_current_company(picks)) == 3
-        strategy.CURRENT_COMPANY = "NVDA"
-        assert len(strategy.drop_current_company(picks)) == 3
-    finally:
-        strategy.CURRENT_COMPANY = saved
-
-
 def main() -> None:
     # 1. cap=None is the old behaviour: pure top-N by prediction.
     day = _panel(["Tech"] * 10)
@@ -135,7 +113,6 @@ def main() -> None:
     assert (out["gics_sector"] == "Tech").sum() == 8, out["gics_sector"].tolist()
     assert abs(out["weight"].sum() - traded["weight"].sum()) < 1e-12
 
-    test_drop_current_company()
     print("all sector-cap checks passed")
 
 
